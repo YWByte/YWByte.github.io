@@ -12,6 +12,6 @@ const posts = await getPosts();
       <h1>{SITE_TITLE}</h1>
       <p>{SITE_DESCRIPTION}</p>
     </div>
-    {posts.map((post) => <PostItem post={post} />)}
+    {posts.length ? posts.map((post) => <PostItem post={post} />) : <p class="empty">还没有文章。</p>}
   </main>
 </Base>
