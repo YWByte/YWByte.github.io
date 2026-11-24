@@ -1,0 +1,17 @@
+---
+import Base from '../layouts/Base.astro';
+import PostItem from '../components/PostItem.astro';
+import { SITE_TITLE, SITE_DESCRIPTION } from '../consts';
+import { getPosts } from '../utils';
+
+const posts = await getPosts();
+---
+<Base nav="posts">
+  <main class="main">
+    <div class="intro">
+      <h1>{SITE_TITLE}</h1>
+      <p>{SITE_DESCRIPTION}</p>
+    </div>
+    {posts.map((post) => <PostItem post={post} />)}
+  </main>
+</Base>

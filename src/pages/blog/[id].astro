@@ -1,0 +1,36 @@
+---
+import { render } from 'astro:content';
+import Base from '../../layouts/Base.astro';
+import { AUTHOR } from '../../consts';
+import { getPosts, formatDate, readingTime } from '../../utils';
+
+export async function getStaticPaths() {
+  const posts = await getPosts();
+  // 列表按时间倒序，所以 i+1 是更早的“上一篇”
+  return posts.map((post, i) => ({
+    params: { id: post.id },
+    props: { post, prev: posts[i + 1], next: posts[i - 1] },
+  }));
+}
+
+const { post, prev, next } = Astro.props;
+const { Content } = await render(post);
+---
+<Base title={post.data.title} description={post.data.description} nav="posts">
+  <main class="main">
+    <a class="back" href="/">← 全部文章</a>
+    <article>
+      <h1 class="title">{post.data.title}</h1>
+      <div class="byline">
+        <span class="avatar">{AUTHOR[0]}</span>
+        <div>{AUTHOR}<small>{formatDate(post.data.date)} · {readingTime(post.body)} 分钟阅读</small></div>
+        <span class="tag" style="margin-left:auto">{post.data.tag}</span>
+      </div>
+      <div class="prose"><Content /></div>
+    </article>
+    <nav class="pager">
+      {prev ? <a href={`/blog/${prev.id}/`}>← 上一篇<small>{prev.data.title}</small></a> : <span />}
+      {next ? <a href={`/blog/${next.id}/`} style="text-align:right">下一篇 →<small>{next.data.title}</small></a> : <span />}
+    </nav>
+  </main>
+</Base>

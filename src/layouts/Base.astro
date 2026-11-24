@@ -1,0 +1,57 @@
+---
+import '../styles/global.css';
+import Icon from '../components/Icon.astro';
+import { SITE_TITLE, SITE_DESCRIPTION, GITHUB } from '../consts';
+
+interface Props { title?: string; description?: string; nav?: 'posts' | 'archive' | 'about' }
+const { title, description = SITE_DESCRIPTION, nav } = Astro.props;
+const pageTitle = title ? `${title} · ${SITE_TITLE}` : SITE_TITLE;
+---
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{pageTitle}</title>
+  <meta name="description" content={description} />
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+  <link rel="alternate" type="application/rss+xml" title={SITE_TITLE} href="/rss.xml" />
+  <script is:inline>
+    // 在首帧渲染前应用主题，避免闪烁
+    document.documentElement.dataset.theme = localStorage.getItem('theme') ?? 'light';
+  </script>
+</head>
+<body>
+  <header class="header">
+    <div class="header-in">
+      <a class="site" href="/">{SITE_TITLE}</a>
+      <nav class="nav">
+        <a href="/" title="文章" aria-label="文章" class:list={['icon-btn', { on: nav === 'posts' }]}><Icon name="posts" /></a>
+        <a href="/archive/" title="归档" aria-label="归档" class:list={['icon-btn', { on: nav === 'archive' }]}><Icon name="archive" /></a>
+        <a href="/about/" title="关于" aria-label="关于" class:list={['icon-btn', { on: nav === 'about' }]}><Icon name="about" /></a>
+        <span class="nav-sep"></span>
+        <button class="icon-btn" id="theme-toggle" type="button" title="切换主题" aria-label="切换主题">
+          <Icon name="moon" class="i-moon" /><Icon name="sun" class="i-sun" />
+        </button>
+      </nav>
+    </div>
+  </header>
+  <slot />
+  <footer class="footer">
+    <div class="footer-in">
+      <span>© {new Date().getFullYear()} {SITE_TITLE}</span>
+      <span class="footer-links">
+        <a class="icon-btn" href={GITHUB} title="GitHub" aria-label="GitHub"><Icon name="github" size={16} /></a>
+        <a class="icon-btn" href="/rss.xml" title="RSS" aria-label="RSS"><Icon name="rss" size={16} /></a>
+      </span>
+    </div>
+  </footer>
+  <script is:inline>
+    document.getElementById('theme-toggle').addEventListener('click', () => {
+      const next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+      document.documentElement.dataset.theme = next;
+      localStorage.setItem('theme', next);
+    });
+  </script>
+</body>
+</html>
