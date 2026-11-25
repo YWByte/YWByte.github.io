@@ -1,0 +1,917 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>从奖励到 Agent（一）：从模仿到试错 · YW</title>
+<meta name="description" content="从 Transformer 输出的概率分布讲起，推导策略梯度，理解模型怎样只凭一个分数学习。">
+<script>document.documentElement.dataset.theme = localStorage.getItem('theme') ?? 'light';</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<header class="header">
+  <div class="header-in">
+    <a class="site" href="/">YW</a>
+    <button class="icon-btn" id="theme-toggle" type="button" title="切换主题" aria-label="切换主题">
+      <svg class="i-moon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"/></svg>
+      <svg class="i-sun" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
+    </button>
+  </div>
+</header>
+
+<main class="main">
+<a class="back" href="/">← 返回文章列表</a>
+<h1 class="title">从奖励到 Agent（一）：从模仿到试错</h1>
+<div class="byline">
+  <span class="avatar">YW</span>
+  <div>YW<small>2026-11-24 · 第 1 篇</small></div>
+</div>
+
+<article class="prose">
+
+<nav class="toc">
+<ol>
+  <li><span class="n">0</span><a href="#s0">前置：下一个 token 的分数从哪里来</a></li>
+  <li><span class="n">1</span><a href="#s1">模型输出的是一个分布</a></li>
+  <li><span class="n">2</span><a href="#s2">监督微调在做什么</a></li>
+  <li><span class="n">3</span><a href="#s3">监督微调的局限</a></li>
+  <li><span class="n">4</span><a href="#s4">强化学习的基本语言</a></li>
+  <li><span class="n">5</span><a href="#s5">策略梯度</a></li>
+  <li><span class="n">6</span><a href="#s6">用采样估计梯度</a></li>
+  <li><span class="n">7</span><a href="#s7">训练一个修 bug 的模型</a></li>
+  <li><span class="n">8</span><a href="#s8">REINFORCE 的三个问题</a></li>
+  <li><span class="n">9</span><a href="#s9">完整的训练循环</a></li>
+  <li><span class="n">10</span><a href="#s10">小结与练习</a></li>
+</ol>
+</nav>
+
+<p>本篇用同一个例子贯穿始终。下面这个函数有 bug：传入空列表时会除以零。</p>
+
+<pre><code>def mean(xs):
+    return sum(xs) / len(xs)
+
+# 测试：mean([]) == 0，mean([1, 2, 3]) == 2</code></pre>
+
+<p>我们把函数体清空，让模型从光标处开始重新写：</p>
+
+<pre><code>def mean(xs):
+    ▌</code></pre>
+
+<p>它可能写出很多种代码，有的能通过测试，有的不能。我们关心的问题是：<strong>如果只能告诉模型“过了”或“没过”，它能不能学会修这个 bug？</strong>回答这个问题之前，需要先看清楚模型本身是什么。</p>
+
+<!-- ============================================================ -->
+<h2 id="s0"><span class="num">0</span>前置：下一个 token 的分数从哪里来</h2>
+
+<p>后面所有的训练，最终改变的都是“下一个 token 选谁”的概率。所以先把这个概率怎么算出来讲清楚。Transformer 内部的注意力机制这里不展开，只看它的最后一步：怎样从一个向量变成每个 token 的分数。</p>
+
+<h3><span class="num">0.1</span>每个位置都有一个向量</h3>
+
+<p>输入 <code>def mean(xs):</code> 会先被切成 token，比如 <code>def</code>、<code>mean</code>、<code>(</code>、<code>xs</code>、<code>)</code>、<code>:</code>。每个 token 先查表变成一个向量，然后依次经过很多层 Transformer。每一层都会让每个位置的向量吸收上下文的信息：<code>xs</code> 这个位置的向量，会逐渐带上“它是函数参数”“它多半是一个列表”这样的信息。</p>
+
+<p>经过最后一层后，每个位置都有一个最终向量 \(h_1, h_2, \ldots, h_t\)。这些向量叫做<strong>隐状态</strong>。“隐”的意思是它们不是直接输出给人看的东西，而是模型内部的中间表示。</p>
+
+<h3><span class="num">0.2</span>为什么只取最后一个位置</h3>
+
+<p>GPT 这类模型做的是因果注意力：每个位置只能看到自己和它前面的 token。于是第 1 个位置只知道 <code>def</code>，第 3 个位置只知道 <code>def mean (</code>，只有最后一个位置 <code>:</code> 看到了完整的 <code>def mean(xs):</code>。</p>
+
+<p>要预测 <code>:</code> 后面写什么，当然要用看到信息最全的那个向量，也就是最后一层、最后一个位置的隐状态：</p>
+
+$$h = h_t$$
+
+<p>这里有两个“最后”，含义不同。“最后一层”是指 Transformer 堆叠的层数方向，取加工得最充分的那一层；“最后一个位置”是指序列的长度方向，取看到上下文最完整的那个 token。两者交叉处的这一个向量，就是 \(h\)。</p>
+
+<p>可以把 \(h\) 理解成模型对一个问题的回答：<strong>看完目前的上下文，下一步应该写什么样的东西？</strong>它不是某个具体的 token，而是一串数字，描述“接下来需要的东西有什么特征”。</p>
+
+<h3><span class="num">0.3</span>一个三维的玩具例子</h3>
+
+<p>真实模型里，\(h\) 有几千维，比如 4096 维。为了能手算，我们假设它只有 3 维，并且暂时给每一维起个名字：</p>
+
+<ul>
+  <li>第 1 维：这里是否需要一个条件判断；</li>
+  <li>第 2 维：这里是否应该立刻结束函数；</li>
+  <li>第 3 维：这里是否和“空列表”这种边界情况有关。</li>
+</ul>
+
+<div class="aside">
+<span class="aside-title">注意</span>
+<p>真实模型的维度通常没有这么干净的含义。一个概念往往分散在很多维上，一维也往往同时参与很多概念。这里给维度命名，只是为了让点积的计算有直观的读法，机制本身和真实模型完全一样。</p>
+</div>
+
+<p>假设模型读完 <code>def mean(xs):</code> 之后，算出的隐状态是：</p>
+
+$$h = [\,0.9,\ 0.1,\ 0.8\,]$$
+
+<p>按上面的命名来读：很需要条件判断，不太需要立刻返回，和空列表关系很大。这正是一个“意识到要先处理空列表”的状态。</p>
+
+<h3><span class="num">0.4</span>输出矩阵：每个 token 一行</h3>
+
+<p>有了 \(h\)，还要知道它和词表里每个 token 的关系。这件事由<strong>输出矩阵</strong> \(W\) 完成，它也常被叫做 LM head 或 unembedding。假设词表只有 4 个 token，\(W\) 就有 4 行，每行是一个 3 维向量，对应一个 token：</p>
+
+<table>
+  <thead><tr><th>token</th><th>这一行的向量 \(w_i\)</th><th>按维度的读法</th></tr></thead>
+  <tbody>
+    <tr><td><code>if</code></td><td>\([\,1.0,\ 0.0,\ 0.5\,]\)</td><td>强烈对应条件判断，也和边界情况有关</td></tr>
+    <tr><td><code>return</code></td><td>\([\,0.2,\ 1.0,\ 0.1\,]\)</td><td>主要对应结束函数</td></tr>
+    <tr><td><code>try</code></td><td>\([\,0.3,\ 0.0,\ 0.6\,]\)</td><td>和异常、边界情况有一定关系</td></tr>
+    <tr><td><code>pass</code></td><td>\([\,-0.5,\ 0.2,\ -0.3\,]\)</td><td>和当前需要的东西基本相反</td></tr>
+  </tbody>
+</table>
+
+<p>这里要区分两种东西。\(h\) 是<strong>每次计算出来的</strong>，换一段上下文就会变；\(W\) 是<strong>训练学到的参数</strong>，推理时固定不变。\(W\) 的每一行记录的是：什么样的上下文适合输出这个 token。</p>
+
+<h3><span class="num">0.5</span>点积就是逐个打分</h3>
+
+<p>要判断 <code>if</code> 适不适合当前上下文，就拿 \(h\) 和 <code>if</code> 那一行做点积：对应维度相乘，再加起来。</p>
+
+$$z_{\texttt{if}} = 0.9 \times 1.0 + 0.1 \times 0.0 + 0.8 \times 0.5 = 1.30$$
+
+<p>逐项看这个式子。第 1 维：上下文很需要条件判断（0.9），<code>if</code> 恰好擅长条件判断（1.0），贡献 0.9。第 3 维：上下文和空列表相关（0.8），<code>if</code> 也和边界情况相关（0.5），贡献 0.4。第 2 维：上下文不太需要返回（0.1），<code>if</code> 在这一维是 0，贡献 0。</p>
+
+<p>每一项都是“上下文需要多少”乘以“这个 token 提供多少”。两者都大，这一项就大；一正一负，这一项就是负的，会把分数往下拉。对其他三个 token 做同样的计算：</p>
+
+$$\begin{aligned}
+z_{\texttt{return}} &= 0.9 \times 0.2 + 0.1 \times 1.0 + 0.8 \times 0.1 = 0.36 \\
+z_{\texttt{try}} &= 0.9 \times 0.3 + 0.1 \times 0.0 + 0.8 \times 0.6 = 0.75 \\
+z_{\texttt{pass}} &= 0.9 \times (-0.5) + 0.1 \times 0.2 + 0.8 \times (-0.3) = -0.67
+\end{aligned}$$
+
+<p><code>return</code> 分数不高，因为它擅长的“结束函数”恰好是当前上下文不需要的。<code>pass</code> 的每一维都和需求反着来，所以得到负分。这些分数叫做 <strong>logit</strong>。</p>
+
+<h3><span class="num">0.6</span>“乘以 \(W\)”就是一次做完所有点积</h3>
+
+<p>上面一行一行地算了 4 次点积。把 4 行叠成矩阵，这 4 次点积就是一次矩阵乘向量：</p>
+
+$$z = W h = \begin{bmatrix} 1.0 & 0.0 & 0.5 \\ 0.2 & 1.0 & 0.1 \\ 0.3 & 0.0 & 0.6 \\ -0.5 & 0.2 & -0.3 \end{bmatrix} \begin{bmatrix} 0.9 \\ 0.1 \\ 0.8 \end{bmatrix} = \begin{bmatrix} 1.30 \\ 0.36 \\ 0.75 \\ -0.67 \end{bmatrix}$$
+
+<p>矩阵乘向量的结果，第 \(i\) 个分量正是第 \(i\) 行和向量的点积，也就是 \(z_i = w_i^\top h\)。形状上，\(W\) 是 \(4 \times 3\)（4 个 token，每个 3 维），\(h\) 是 3 维，\(z\) 是 4 维，每个 token 一个分数。</p>
+
+<p>真实模型只是规模更大。词表有 15 万个 token、\(h\) 有 4096 维时，\(W\) 就是 \(150000 \times 4096\) 的矩阵。“最后一层的隐状态 \(h\) 乘以输出矩阵 \(W\)”说的就是：<strong>拿当前上下文的向量，同时和词表里 15 万个 token 各做一次点积，得到 15 万个分数。</strong></p>
+
+<h3><span class="num">0.7</span>从分数到概率</h3>
+
+<p>logit 可以是负数，加起来也不等于 1，不能直接当概率用。下一节会详细讲的 softmax 把它们变成概率：先对每个分数取指数让它变成正数，再除以总和让它们加起来等于 1。代入上面的分数：</p>
+
+<table>
+  <thead><tr><th>token</th><th>logit \(z_i\)</th><th>\(e^{z_i}\)</th><th>概率</th></tr></thead>
+  <tbody>
+    <tr><td><code>if</code></td><td>1.30</td><td>3.67</td><td>47.5%</td></tr>
+    <tr><td><code>try</code></td><td>0.75</td><td>2.12</td><td>27.4%</td></tr>
+    <tr><td><code>return</code></td><td>0.36</td><td>1.43</td><td>18.5%</td></tr>
+    <tr><td><code>pass</code></td><td>−0.67</td><td>0.51</td><td>6.6%</td></tr>
+  </tbody>
+</table>
+
+<p>指数之和是 7.73，每个 \(e^{z_i}\) 除以 7.73 就是概率。到这里，模型完成了一次“预测下一个 token”：上下文 → 隐状态 \(h\) → 和每个 token 做点积得到 logit → softmax 得到概率。</p>
+
+<p>下图把整条链路放在一起。拖动 \(h\) 的三个分量，模拟“模型对上下文的理解变了”，看每个 token 的点积怎样逐项变化，概率又怎样跟着变化：</p>
+
+<figure class="viz" id="viz-dot">
+  <div class="viz-box">
+    <div class="viz-ctx">def mean(xs):
+    <span class="cursor"></span></div>
+    <div class="hvec"></div>
+    <div class="dot-rows"></div>
+    <div class="controls">
+      <button class="btn" data-preset="0">空列表敏感</button>
+      <button class="btn" data-preset="1">想直接返回</button>
+      <button class="btn" data-preset="2">什么都不想</button>
+    </div>
+  </div>
+  <figcaption>图 0　隐状态 \(h\) 与 \(W\) 的每一行做点积得到 logit，再经 softmax 得到概率</figcaption>
+</figure>
+
+<p>可以试几件事。点“想直接返回”，第 2 维变大，<code>return</code> 的点积随之上升，成为最可能的 token，这就是模型写出那段有 bug 的 <code>return sum(xs) / len(xs)</code> 时的状态。点“什么都不想”，\(h\) 接近零向量，所有点积都接近 0，四个 token 的概率接近平均：上下文没有提供任何倾向，模型也就没有偏好。再把第 3 维拉到负数，<code>pass</code> 在这一维是负的，负负得正，它的分数反而会上升。</p>
+
+<h3><span class="num">0.8</span>训练改变的是哪些东西</h3>
+
+<p>假设在这个上下文下，我们希望模型输出 <code>if</code>。训练会提高 \(z_{\texttt{if}}\)，压低其他 token 的 logit。由于 \(z_{\texttt{if}} = w_{\texttt{if}}^\top h\)，有两条路可以做到：</p>
+
+<ul>
+  <li><strong>改 \(W\)</strong>：把 \(w_{\texttt{if}}\) 往 \(h\) 的方向挪一点，让 <code>if</code> 这一行更像“这种上下文”。同时把其他行往远离 \(h\) 的方向挪一点。</li>
+  <li><strong>改 Transformer 内部的参数</strong>：让模型以后读到类似的代码时，算出的 \(h\) 更靠近 \(w_{\texttt{if}}\)。</li>
+</ul>
+
+<p>两条路由反向传播同时完成，调整量由梯度决定。第 2 节会推导这个梯度的具体形式。现在只需要记住一点：<strong>无论是监督学习还是强化学习，训练最终都落在“调整 logit，从而调整概率”上。</strong>两者的区别只在于，用什么信号决定哪些 logit 往上调、哪些往下调。</p>
+
+<p>后面的章节会反复把注意力放在 logit 和概率上，Transformer 内部的细节则被看成一个整体：输入上下文，输出一个 \(h\)，再经 \(W\) 和 softmax 变成概率。这个整体，就是后文所说的<strong>模型</strong>，在 RL 里也叫<strong>策略</strong>。</p>
+
+<!-- ============================================================ -->
+<h2 id="s1"><span class="num">1</span>模型输出的是一个分布</h2>
+
+<h3><span class="num">1.1</span>从 logit 到概率</h3>
+
+<p>上一节看到，最后一层、最后一个位置的隐状态 \(h\) 乘以输出矩阵 \(W\)，得到一个长度等于词表大小的向量，每个 token 一个分数：</p>
+
+$$z = W h, \qquad z \in \mathbb{R}^{|V|}$$
+
+<p>这些分数就是 logit。它们可以是任意实数，本身没有概率含义。把它们变成概率的是 softmax：</p>
+
+$$p_i = \frac{e^{z_i}}{\sum_j e^{z_j}}$$
+
+<p>softmax 做了两件事：取指数保证每个值都是正数，再除以总和保证加起来是 1。于是我们得到一个分布：在当前前文下，下一个 token 是每个候选的概率。</p>
+
+<p>在光标处，模型的输出可能长这样。为了看得清楚，下面只保留 5 个候选 token。拖动左边的滑块改变 logit，看右边的概率怎么变化：</p>
+
+<figure class="viz" id="viz-softmax">
+  <div class="viz-box">
+    <div class="viz-ctx">def mean(xs):
+    <span class="cursor"></span></div>
+    <div class="rows"></div>
+    <div class="controls">
+      <label style="flex:1;min-width:220px">温度
+        <input type="range" data-opt="temp" min="0.2" max="3" step="0.1" value="1" aria-label="温度">
+        <span class="readout temp-readout"></span>
+      </label>
+    </div>
+    <div class="controls">
+      <button class="btn primary" data-act="sample">按这个分布抽 20 次</button>
+      <span class="readout logit-readout"></span>
+    </div>
+    <div class="samples"></div>
+  </div>
+  <figcaption>图 1　logit 经过 softmax 变成概率；温度改变分布的尖锐程度</figcaption>
+</figure>
+
+<p>先不动温度，只拖 logit。有三个性质值得记住。</p>
+
+<p><strong>概率此消彼长。</strong>只拉高 <code>if</code> 的 logit，其他所有 token 的概率都会下降，因为分母变大了，而总和必须是 1。这意味着，提高一个 token 的概率，一定等于压低其他 token 的概率。</p>
+
+<p><strong>只有 logit 之间的差值有意义。</strong>把所有 logit 同时加上同一个常数 \(c\)，分子分母都乘以 \(e^c\)，概率完全不变。所以单看某个 logit 是 1.8 还是 5.0 没有意义，要看它比其他 logit 高多少。两个 token 的概率之比只取决于 logit 之差：</p>
+
+$$\frac{p_i}{p_j} = e^{z_i - z_j}$$
+
+<p>logit 每相差 1，概率之比就相差约 2.7 倍；相差 3，概率之比约 20 倍。</p>
+
+<p><strong>概率低不等于不会出现。</strong>默认设置下 <code>try</code> 的概率约 0.11。点几次“抽 20 次”，你会发现它经常出现一两次。这件事看起来平常，但它是第 7 节里模型能够学习的前提：模型只有偶尔写出某种代码，才有机会知道这种代码好不好。</p>
+
+<h3><span class="num">1.2</span>采样与温度</h3>
+
+<p>得到分布之后，生成时要从中选出一个 token。有两种基本做法：</p>
+
+<ul>
+  <li><strong>贪心解码</strong>：每次选概率最大的那个。同一个 prompt，永远得到同一个输出。</li>
+  <li><strong>采样</strong>：按概率随机抽。概率 0.52 的 token 大约一半的时候被选中，概率 0.11 的大约十次里出现一次。</li>
+</ul>
+
+<p>RL 训练时用的是采样。原因在上一段已经提到：如果总是贪心，模型永远只写同一段代码，就没有机会发现别的写法可能更好。</p>
+
+<p>采样前通常还会把 logit 除以一个<strong>温度</strong> \(T\)：</p>
+
+$$p_i = \frac{e^{z_i / T}}{\sum_j e^{z_j / T}}$$
+
+<p>拖动图 1 的温度滑块：</p>
+
+<ul>
+  <li>\(T &lt; 1\) 时，logit 之间的差距被放大，分布变尖，高概率的 token 更占优势。\(T \to 0\) 就退化成贪心。</li>
+  <li>\(T &gt; 1\) 时，差距被缩小，分布变平，低概率的 token 更容易被抽到。</li>
+</ul>
+
+<p>默认 logit 下，\(T = 0.5\) 时 <code>try</code> 的概率从 0.11 降到 0.03；\(T = 2\) 时升到 0.16。温度是一个控制“多大胆子去尝试”的旋钮，RL 训练里通常设为 1，也就是直接使用模型本来的分布。</p>
+
+<h3><span class="num">1.3</span>一整段代码的概率</h3>
+
+<p>上面只看了一个位置。模型写一段代码，是一个 token 一个 token 地生成的：每写出一个 token，就把它接到前文后面，再预测下一个。</p>
+
+<p>记 prompt 为 \(x\)，生成的 token 依次是 \(y_1, y_2, \dots, y_T\)。整段输出的概率，按链式法则等于每一步条件概率的乘积：</p>
+
+$$\pi_\theta(y \mid x) = \prod_{t=1}^{T} \pi_\theta(y_t \mid x, y_{&lt;t})$$
+
+<p>这里 \(\pi_\theta\) 就是模型，\(\theta\) 是它的全部参数，\(y_{&lt;t}\) 表示第 \(t\) 步之前已经写出的 token。之后我们会一直用 \(\pi_\theta\) 这个记号，它既表示“模型”，也表示“模型给出的概率”。</p>
+
+<p>举个例子。假设模型写出 <code>if not xs: return 0</code>，第一步选 <code>if</code> 的概率是 0.3，第二步在 <code>if</code> 后面选 <code>not</code> 的概率是 0.4，后面的 token 都几乎是确定的，概率接近 1。那么整段代码的概率约是 \(0.3 \times 0.4 = 0.12\)。</p>
+
+<h3><span class="num">1.4</span>为什么总是取对数</h3>
+
+<p>一段几百个 token 的输出，概率是几百个小于 1 的数相乘，很快就会小到浮点数表示不了。所以实际计算时总是取对数，把乘积变成求和：</p>
+
+$$\log \pi_\theta(y \mid x) = \sum_{t=1}^{T} \log \pi_\theta(y_t \mid x, y_{&lt;t})$$
+
+<p>取对数还有一个好处：每个位置的贡献变成了相加的独立项。后面会看到，无论是监督微调还是强化学习，loss 都是对每个位置的 \(\log \pi\) 做加权求和，区别只在于权重是什么。</p>
+
+<p>本节的结论很简单：</p>
+
+<blockquote><p>模型在每个位置给出一个分布。训练模型，就是调整参数，让某些 token 的概率变高、另一些变低。</p></blockquote>
+
+<p>之后的所有方法，回答的都是同一个问题：<strong>该推高哪些 token，推多少。</strong></p>
+
+<!-- ============================================================ -->
+<h2 id="s2"><span class="num">2</span>监督微调在做什么</h2>
+
+<h3><span class="num">2.1</span>交叉熵 loss</h3>
+
+<p>先看最熟悉的情况：我们有一份标准答案。比如人类工程师写的修复是 <code>if not xs: return 0</code>，那么光标处的标准答案就是 <code>if</code>。</p>
+
+<p>监督微调（SFT）希望标准答案的概率尽可能大。直接最大化概率不方便，通常最小化它的负对数，也就是交叉熵：</p>
+
+$$\mathcal{L} = -\log p_{\text{target}}$$
+
+<p>这个 loss 有一个直观的读法：标准答案的概率越低，loss 越大，而且是急剧变大。概率 0.9 时 loss 约 0.11；概率 0.29 时约 1.24；概率趋近 0 时 loss 趋近无穷。模型越是“自信地错”，受到的惩罚越重。</p>
+
+<h3><span class="num">2.2</span>梯度长什么样</h3>
+
+<p>反向传播从 logit 开始。我们来求 loss 对每个 logit 的导数。把 softmax 代进去：</p>
+
+$$\mathcal{L} = -\log \frac{e^{z_k}}{\sum_j e^{z_j}} = -z_k + \log \sum_j e^{z_j}$$
+
+<p>其中 \(k\) 是标准答案的下标。第二项对 \(z_i\) 求导：</p>
+
+$$\frac{\partial}{\partial z_i} \log \sum_j e^{z_j} = \frac{e^{z_i}}{\sum_j e^{z_j}} = p_i$$
+
+<p>第一项只有在 \(i = k\) 时才有导数 \(-1\)。合起来：</p>
+
+$$\frac{\partial \mathcal{L}}{\partial z_i} = p_i - \mathbb{1}[i = k]$$
+
+<p>梯度下降沿着负梯度方向走，所以 logit 的变化方向是：</p>
+
+$$-\frac{\partial \mathcal{L}}{\partial z_i} = \begin{cases} 1 - p_k & i = k \text{（标准答案）} \\ -p_i & i \neq k \text{（其他 token）} \end{cases}$$
+
+<p>这个结果值得多看一会儿，因为它会在本篇反复出现。用大白话说：</p>
+
+<ul>
+  <li><strong>标准答案被往上推</strong>，力度是它“离 1 还差多少”。已经很确定的答案，几乎不再被推。</li>
+  <li><strong>其他 token 被往下压</strong>，力度和它们当前的概率成正比。模型越相信某个错误选项，它被压得越狠；本来就几乎不会选的 token，几乎不受影响。</li>
+  <li>所有分量加起来是 0：\((1 - p_k) - \sum_{i \neq k} p_i = 0\)。这和 1.1 节说的“只有差值有意义”是一回事，梯度不会浪费在“所有 logit 一起变大”这种无效方向上。</li>
+</ul>
+
+<h3><span class="num">2.3</span>一步更新</h3>
+
+<p>点“训练一步”，看一次梯度更新带来的变化。右侧数字是这一步造成的概率变化。也可以点其他行，把它设为标准答案：</p>
+
+<figure class="viz" id="viz-sft">
+  <div class="viz-box">
+    <div class="rows"></div>
+    <div class="controls">
+      <button class="btn primary" data-act="step">训练一步</button>
+      <button class="btn" data-act="reset">重置</button>
+      <span class="readout loss-readout"></span>
+    </div>
+  </div>
+  <figcaption>图 2　SFT 的一步：推高标准答案，按概率比例压低其他 token（学习率为 1，直接作用在 logit 上）</figcaption>
+</figure>
+
+<p>第一步之后，<code>if</code> 从 0.29 升到 0.55，<code>return</code> 从 0.52 降到 0.29，被压得最多，因为它原本是最大的竞争者。<code>#</code> 几乎不变，因为它本来就只有 0.03。</p>
+
+<p>继续点下去，<code>if</code> 涨得越来越慢。它离 1 越近，\(1 - p\) 越小，梯度也越小。loss 的数值也印证了这一点：前几步下降很快，之后越来越平。</p>
+
+<div class="aside">
+<span class="aside-title">旁注：logit 不是直接被更新的</span>
+<p>图 2 为了看清楚，直接修改了 logit。真实模型里，logit 是 \(z = Wh\) 算出来的，被更新的是参数 \(\theta\)。梯度先到达 logit，再经过反向传播分配到每一层的参数上。所以“推高 <code>if</code> 的 logit”实际意味着：调整参数，使得在这个前文下算出来的 \(z_{\text{if}}\) 变大。这个区别在 2.5 节会变得重要。</p>
+</div>
+
+<h3><span class="num">2.4</span>整段答案</h3>
+
+<p>真实的标准答案是一整段代码。SFT 对其中每个位置都做一次 2.3 节的推动，loss 是每个位置的交叉熵之和：</p>
+
+$$\mathcal{L}_{\text{SFT}} = -\sum_{t=1}^{T} \log \pi_\theta(y_t \mid x, y_{&lt;t})$$
+
+<p>注意前文 \(y_{&lt;t}\) 用的是<strong>标准答案</strong>的前文，而不是模型自己写出的内容。训练时，模型永远站在“前面都写对了”的位置上，预测下一个正确的 token。这种做法叫 teacher forcing。它让训练可以并行，一次前向就算出所有位置的 loss，但也埋下了 3.3 节要讲的问题。</p>
+
+<p>比较 1.4 节的式子会发现，\(\mathcal{L}_{\text{SFT}}\) 恰好就是 \(-\log \pi_\theta(y \mid x)\)。也就是说，SFT 在做的事情，是<strong>最大化整段标准答案的概率</strong>。</p>
+
+<h3><span class="num">2.5</span>参数是共享的</h3>
+
+<p>图 2 里，每个 token 有自己独立的 logit，推高一个不会影响别的前文。真实模型不是这样。同一套参数要负责所有前文下的所有预测，推高“<code>def mean(xs):</code> 后面写 <code>if</code>”，会连带影响“<code>def median(xs):</code> 后面写什么”。</p>
+
+<p>这种连带影响正是泛化的来源：在一个函数上学会“先检查空输入”，在相似的函数上也会更倾向这样做。但它也意味着更新不是局部的，学一个新东西可能会把别的东西改坏。后面讲遗忘、讲 KL 约束时，背后都是这个原因。</p>
+
+<!-- ============================================================ -->
+<h2 id="s3"><span class="num">3</span>监督微调的局限</h2>
+
+<p>SFT 简单、稳定、高效，大模型的后训练几乎都从它开始。但它对数据有一个很强的要求：<strong>每个位置都要有标准答案</strong>。这个要求带来几个绕不开的问题。</p>
+
+<h3><span class="num">3.1</span>正确答案不止一个</h3>
+
+<p>修这个 bug，至少有三种正确写法：</p>
+
+<pre><code>if not xs: return 0
+return sum(xs) / len(xs) if xs else 0
+try: return sum(xs) / len(xs)
+except ZeroDivisionError: return 0</code></pre>
+
+<p>SFT 只能选其中一种当标准答案。如果选了第一种，那么在光标处，标准答案是 <code>if</code>。按 2.2 节的梯度，<code>return</code> 和 <code>try</code> 都会被往下压，即便它们引出的代码同样正确。</p>
+
+<p>模型因此学到的不是“怎样修好这个 bug”，而是“怎样写得像这份答案”。如果数据集里不同样本用了不同写法，模型就会在这些写法之间摇摆，并为此付出 loss。</p>
+
+<h3><span class="num">3.2</span>上限是示范者</h3>
+
+<p>SFT 的目标是让模型的分布接近示范数据的分布。如果训练完美，模型会和示范者写得一样，但不会更好。示范数据里没有的更优写法，SFT 没有任何机制去发现它。</p>
+
+<p>对于简单任务，这不成问题。但对于需要长时间推理和试错的任务，比如修一个跨越多个文件的 bug，人类的示范数据又贵又少，而且示范者本身也会犯错。</p>
+
+<h3><span class="num">3.3</span>只见过正确的路径</h3>
+
+<p>这是最微妙、也最重要的问题。</p>
+
+<p>2.4 节说过，SFT 训练时，模型总是站在“前面都写对了”的位置上。但生成时，前文是模型<strong>自己</strong>写的。只要某一步写偏了，后面的前文就是训练数据里从没出现过的状态。模型没学过在这种状态下该怎么办，很可能继续出错，越走越偏。</p>
+
+<p>这个问题有个名字，叫 <strong>exposure bias</strong>：训练时暴露给模型的状态分布，和生成时它实际遇到的状态分布不一样。</p>
+
+<p>可以粗略估算一下影响。假设模型在每一步都有 \(\varepsilon\) 的概率走偏，并且一旦走偏就回不来。那么连续 \(T\) 步都不出错的概率是：</p>
+
+$$(1 - \varepsilon)^T$$
+
+<p>拖动下面的滑块感受一下：</p>
+
+<figure class="viz" id="viz-compound">
+  <div class="viz-box">
+    <svg class="curve tall" viewBox="0 0 600 200" preserveAspectRatio="none" aria-label="误差累积曲线"></svg>
+    <div class="controls">
+      <label style="flex:1;min-width:200px">每步出错概率 ε
+        <input type="range" data-opt="eps" min="0.1" max="5" step="0.1" value="1">
+      </label>
+      <label style="flex:1;min-width:200px">步数 T
+        <input type="range" data-opt="steps" min="1" max="500" step="1" value="100">
+      </label>
+    </div>
+    <p class="readout compound-readout" style="margin:12px 0 0"></p>
+  </div>
+  <figcaption>图 3　误差累积：单步看起来很小的出错率，在长序列上会迅速吞掉成功率</figcaption>
+</figure>
+
+<p>每步 99% 正确，听起来很好。但 100 步之后，全程无误的概率只剩 37%；300 步之后不到 5%。agent 任务动辄几十轮工具调用、几万个 token，这个问题会被放大到无法忽视。</p>
+
+<p>真实情况没有这么悲观：模型走偏后有时能自己纠正回来。但关键在于，<strong>纠错能力恰恰需要在“已经出错”的状态下练习</strong>，而 SFT 的数据里几乎没有这样的状态。</p>
+
+<h3><span class="num">3.4</span>判断比示范便宜</h3>
+
+<p>换个角度看，我们手里其实还有一样东西：测试。</p>
+
+<p>写出正确代码很难，判断代码对不对却容易得多，跑一下测试就知道了。很多任务都有这种不对称性：数学题有标准答案可以核对，代码有测试，搜索任务可以核对最终答案，网页操作可以检查页面最终状态。</p>
+
+<p>测试不告诉你该怎么写，只告诉你写得对不对。而且它对三种正确写法一视同仁，都给通过；它也不要求模型像谁，只要求结果正确。</p>
+
+<p>如果模型能只靠这种“对或不对”的反馈来学习，3.1 到 3.3 节的问题都有可能解决：</p>
+
+<ul>
+  <li>不需要唯一的标准答案，任何能通过测试的写法都算对。</li>
+  <li>不受示范者水平限制，只要能写出更好的代码，就会被奖励。</li>
+  <li>模型在自己写出的内容上学习，会接触到自己真正会走到的状态，包括出错后的状态。</li>
+</ul>
+
+<p>这就是强化学习要做的事。</p>
+
+<!-- ============================================================ -->
+<h2 id="s4"><span class="num">4</span>强化学习的基本语言</h2>
+
+<h3><span class="num">4.1</span>智能体与环境</h3>
+
+<p>强化学习描述的是一个循环：<strong>智能体</strong>观察当前<strong>状态</strong>，选择一个<strong>动作</strong>；<strong>环境</strong>根据这个动作进入新状态，并可能给出一个<strong>奖励</strong>。智能体的目标是让累积的奖励尽可能多。</p>
+
+<p>经典的例子是下棋或玩游戏：状态是棋盘，动作是落子，奖励是最终输赢。这些概念放到语言模型上，每一个都有具体的对应：</p>
+
+<table>
+  <thead><tr><th>概念</th><th>记号</th><th>在修 bug 的例子里</th></tr></thead>
+  <tbody>
+    <tr><td>策略</td><td>\(\pi_\theta\)</td><td>模型本身。给定前文，它决定下一个 token 的概率分布。</td></tr>
+    <tr><td>状态</td><td>\(s_t\)</td><td>prompt 加上已经写出的 token，也就是模型此刻看到的全部内容。</td></tr>
+    <tr><td>动作</td><td>\(a_t\)</td><td>下一个 token。动作空间就是整个词表。</td></tr>
+    <tr><td>状态转移</td><td></td><td>把选中的 token 接到前文后面。这一步是确定的。</td></tr>
+    <tr><td>轨迹</td><td>\(\tau\)</td><td>从 prompt 开始到生成结束的完整序列，也叫一次 rollout。</td></tr>
+    <tr><td>奖励</td><td>\(R(\tau)\)</td><td>跑测试：通过得 1，失败得 0。</td></tr>
+  </tbody>
+</table>
+
+<p>“策略”这个词听起来抽象，但它就是我们在第 1 节看到的东西：在每个状态下，给每个动作一个概率。之前说“模型”和“\(\pi_\theta\)”，现在可以说“策略”，指的是同一个对象。</p>
+
+<h3><span class="num">4.2</span>两种看待方式</h3>
+
+<p>同一个生成过程，可以从两个粒度来看。</p>
+
+<p><strong>token 级</strong>：每生成一个 token 就是一步决策，一段代码由几十上百步组成。这个视角下，奖励只在最后一步出现，前面每一步的奖励都是 0。</p>
+
+<p><strong>序列级</strong>：把整段输出看成一个动作，模型一次性“选”出一整段代码，然后立刻得到奖励。这个视角下，问题变成了：在所有可能的输出里，模型应该把概率分给哪些。</p>
+
+<p>两种视角在数学上等价，因为整段输出的概率就是每一步概率的乘积。本篇主要用序列级视角推导，因为它最简单；推导完再拆回 token 级，看每个 token 受到了什么影响。到 agent 的场景里，模型和环境要来回交互很多轮，token 级视角会变得必要，那是后面的内容。</p>
+
+<h3><span class="num">4.3</span>目标函数</h3>
+
+<p>模型每次写出的代码不一样，有时通过有时不通过。所以“写得好不好”不能用某一次的结果衡量，要看平均水平。强化学习的目标是最大化<strong>期望奖励</strong>：</p>
+
+$$J(\theta) = \mathbb{E}_{\tau \sim \pi_\theta}\big[R(\tau)\big]$$
+
+<p>\(\tau \sim \pi_\theta\) 的意思是：轨迹 \(\tau\) 是从模型 \(\pi_\theta\) 中采样出来的。在我们的例子里，奖励只有 0 和 1，所以 \(J\) 就是<strong>模型的测试通过率</strong>。</p>
+
+<p>严格说，还应该对 prompt 取期望，因为训练时有很多不同的 bug 要修：</p>
+
+$$J(\theta) = \mathbb{E}_{x \sim \mathcal{D}}\; \mathbb{E}_{\tau \sim \pi_\theta(\cdot \mid x)}\big[R(x, \tau)\big]$$
+
+<p>这里 \(\mathcal{D}\) 是任务的分布。这个外层期望在推导里不起什么作用，后面为了简洁会省略它；但请记住它的存在，到后面讨论“训练题目怎么选”时，它会变成主角。</p>
+
+<h3><span class="num">4.4</span>和 SFT 的两点不同</h3>
+
+<p>把 RL 的设定和 SFT 放在一起看，有两点根本区别。</p>
+
+<p><strong>数据来自模型自己。</strong>SFT 从固定的数据集里读答案。RL 让模型自己写，写完再打分。模型变了，它写出的东西也会变，训练数据随之改变。这让 RL 能接触到模型自己真正会走到的状态，代价是训练过程中必须不断地生成，而生成很慢。</p>
+
+<p><strong>反馈只有一个数，而且来得很晚。</strong>SFT 在每个位置都告诉模型正确答案是什么。RL 只在最后给一个分数，不说哪个 token 写错了，也不说应该怎么写。从这一个数里，模型要自己弄清楚哪些选择是好的。</p>
+
+<p>第二点是强化学习一切困难的来源。本篇先解决最基本的问题：<strong>只有一个分数，梯度从哪里来。</strong></p>
+
+<!-- ============================================================ -->
+<h2 id="s5"><span class="num">5</span>策略梯度</h2>
+
+<h3><span class="num">5.1</span>梯度传不过去</h3>
+
+<p>想最大化 \(J(\theta)\)，最直接的办法是求 \(\nabla_\theta J\)，然后做梯度上升。但马上会撞上一堵墙。</p>
+
+<p>从参数 \(\theta\) 到奖励 \(R\)，计算路径是：参数 → logit → softmax 概率 → <strong>采样</strong>出 token → 拼成代码 → <strong>跑测试</strong> → 奖励。</p>
+
+<p>这条路径断了两次。采样是离散的：概率从 0.29 变成 0.30，抽出来的 token 要么还是同一个，要么突然换了一个，没有连续的变化可言。跑测试是一个外部程序，不是可微的计算图，梯度根本进不去。</p>
+
+<p>所以不能像 SFT 那样，把 \(R\) 当作 loss 直接反向传播。需要换一个思路。</p>
+
+<h3><span class="num">5.2</span>换一个角度写期望</h3>
+
+<p>把期望写成求和的形式。对所有可能的轨迹 \(\tau\)，用它的概率加权它的奖励：</p>
+
+$$J(\theta) = \sum_\tau \pi_\theta(\tau)\, R(\tau)$$
+
+<p>这个式子里有一件很关键的事：<strong>\(R(\tau)\) 和 \(\theta\) 无关。</strong>测试结果只取决于写出了什么代码。同一段代码，不管是哪个模型写的，测试结果都一样。参数 \(\theta\) 唯一能影响的，是每段代码被写出来的<strong>概率</strong> \(\pi_\theta(\tau)\)。</p>
+
+<p>所以求梯度时，\(R\) 可以当成常数，梯度只作用在概率上：</p>
+
+$$\nabla_\theta J = \sum_\tau R(\tau)\, \nabla_\theta \pi_\theta(\tau)$$
+
+<p>这一步已经绕开了那堵墙。我们不再需要对测试程序求导，只需要对“写出某段代码的概率”求导，而这个概率是模型直接算出来的，完全可微。</p>
+
+<p>这个式子的含义也很直观：<strong>要提高平均分，就把高分轨迹的概率推高。</strong>每段代码的概率梯度，用它的奖励加权。奖励是 0 的代码，对梯度没有贡献；奖励是 1 的代码，它的概率会被推高。</p>
+
+<h3><span class="num">5.3</span>求和算不完</h3>
+
+<p>但这个式子还不能用。它要对<strong>所有可能的轨迹</strong>求和。词表有十几万个 token，长度 100 的序列就有 \(10^{500}\) 种以上的可能，根本无法枚举。</p>
+
+<p>如果它是一个<strong>期望</strong>，事情就好办了：期望可以通过采样来估计。抽几个样本，算平均，就是期望的估计值。问题是，上面的式子里每一项的形式是 \(R \cdot \nabla \pi\)，前面没有概率 \(\pi\) 做权重，不是一个期望的形式。</p>
+
+<p>这里需要一个小技巧。根据对数的导数 \(\nabla \log f = \nabla f / f\)，可以把 \(\nabla \pi\) 写成：</p>
+
+$$\nabla_\theta \pi_\theta(\tau) = \pi_\theta(\tau)\, \nabla_\theta \log \pi_\theta(\tau)$$
+
+<p>这叫 <strong>log-derivative trick</strong>（对数导数技巧）。代回去：</p>
+
+$$\nabla_\theta J = \sum_\tau \pi_\theta(\tau)\, R(\tau)\, \nabla_\theta \log \pi_\theta(\tau)$$
+
+<p>现在每一项前面都有了 \(\pi_\theta(\tau)\)，整个求和就是一个期望：</p>
+
+$$\boxed{\;\nabla_\theta J = \mathbb{E}_{\tau \sim \pi_\theta}\Big[\, R(\tau)\, \nabla_\theta \log \pi_\theta(\tau) \,\Big]\;}$$
+
+<p>这就是<strong>策略梯度定理</strong>。它说的是：期望奖励的梯度，等于“奖励乘以对数概率的梯度”在模型分布下的期望。</p>
+
+<p>这个技巧乍看像是变魔术，其实只是把一个因子乘进去又除出来。它的意义在于：期望可以用模型自己的采样来估计，而模型自己采样恰好是我们能做的事。</p>
+
+<h3><span class="num">5.4</span>拆回 token</h3>
+
+<p>\(\log \pi_\theta(\tau)\) 是整段输出的对数概率。由 1.4 节，它等于每个 token 对数概率之和：</p>
+
+$$\nabla_\theta \log \pi_\theta(\tau) = \sum_{t=1}^{T} \nabla_\theta \log \pi_\theta(a_t \mid s_t)$$
+
+<div class="aside">
+<span class="aside-title">旁注：环境的部分会消失</span>
+<p>在 agent 任务里，状态转移不只是“把 token 接到后面”，还包括工具返回的结果、环境的变化。这时轨迹的概率是模型的选择概率和环境的转移概率的乘积：</p>
+$$\pi_\theta(\tau) = \prod_t \pi_\theta(a_t \mid s_t) \cdot P(s_{t+1} \mid s_t, a_t)$$
+<p>取对数后，环境转移那一项变成 \(\sum_t \log P(s_{t+1} \mid s_t, a_t)\)。它和 \(\theta\) 无关，求梯度时直接消失。这意味着：<strong>我们不需要知道环境是怎么运作的，也不需要对环境求导。</strong>只需要知道模型在每一步选了什么、选的概率是多少。这是策略梯度能用在任意环境上的根本原因。</p>
+</div>
+
+<p>于是梯度变成：</p>
+
+$$\nabla_\theta J = \mathbb{E}_{\tau \sim \pi_\theta}\Big[\, R(\tau) \sum_{t=1}^{T} \nabla_\theta \log \pi_\theta(a_t \mid s_t) \,\Big]$$
+
+<h3><span class="num">5.5</span>REINFORCE</h3>
+
+<p>用采样代替期望：让模型写一段代码，跑测试得到 \(R\)，然后按下式更新。写成 loss 的形式（取负号，因为优化器做的是最小化）：</p>
+
+$$\mathcal{L}_{\text{RL}} = -\,R \cdot \sum_{t=1}^{T} \log \pi_\theta(a_t \mid s_t)$$
+
+<p>这就是 <strong>REINFORCE</strong> 算法，Williams 在 1992 年提出。现在把它和 SFT 的 loss 并排放在一起：</p>
+
+$$\mathcal{L}_{\text{SFT}} = -\sum_{t=1}^{T} \log \pi_\theta(y_t \mid x, y_{&lt;t})$$
+
+<p>它们只有两处不同：</p>
+
+<ol>
+  <li>SFT 里的 token \(y_t\) 来自<strong>标准答案</strong>；RL 里的 token \(a_t\) 来自<strong>模型自己的采样</strong>。</li>
+  <li>RL 多了一个权重 <span class="c-reward">\(R\)</span>。</li>
+</ol>
+
+<div class="callout">最基础的强化学习，就是对模型自己写出的答案做 SFT，再按奖励决定这条答案学多少。</div>
+
+<p>计算图上，\(R\) 是一个普通的标量，不参与求导。梯度全部来自 \(\log \pi\)，而 \(\log \pi\) 的计算和 SFT 完全一样。所以 RL 的训练代码几乎可以复用 SFT 的全部基础设施，只是多了“生成”和“打分”两步。</p>
+
+<h3><span class="num">5.6</span>每个 token 受到什么影响</h3>
+
+<p>回到单个位置。2.2 节算过，\(\log p_k\) 对 logit 的梯度是 \(\mathbb{1}[i = k] - p_i\)。在 REINFORCE 里，这个梯度再乘以 \(R\)：</p>
+
+$$\Delta z_i \;\propto\; R \cdot \big(\mathbb{1}[i = a_t] - p_i\big)$$
+
+<p>其中 \(a_t\) 是模型在这个位置实际选的 token。和 SFT 的唯一区别是：<strong>被推高的不是标准答案，而是模型刚才自己选的那个 token</strong>，推的力度再乘以 \(R\)。</p>
+
+<ul>
+  <li>如果 \(R = 1\)：沿途每个位置上，模型选过的 token 都被推高，就像把这段代码当成标准答案做了一次 SFT。</li>
+  <li>如果 \(R = 0\)：梯度乘以 0，什么也不发生。</li>
+</ul>
+
+<p>注意，同一条轨迹里的<strong>每一个</strong> token 都乘以同一个 \(R\)。代码通过了测试，模型不知道是哪个 token 起了作用，于是所有 token 一起被推高，包括那些无关紧要的。这个问题叫<strong>功劳分配</strong>（credit assignment），后面会专门讨论。</p>
+
+<!-- ============================================================ -->
+<h2 id="s6"><span class="num">6</span>用采样估计梯度</h2>
+
+<h3><span class="num">6.1</span>一次采样的估计</h3>
+
+<p>REINFORCE 用一次采样代替期望。一次采样的结果显然是有偏差的。比如采到一段失败的代码，梯度是 0；采到一段成功的代码，梯度只推高这一段。单看一次，它和真实梯度可能相差很远。</p>
+
+<p>但只要采样足够多，平均值会接近真实梯度。下面这个实验把这件事画出来。假设模型只会写 4 种补丁，概率和测试结果如下。每采一次，就计算一次 \(R \cdot \nabla \log \pi\)，看它对 4 个补丁的 logit 分别给出什么方向。黄色竖线是真实梯度，可以直接算出来：</p>
+
+<figure class="viz" id="viz-estimator">
+  <div class="viz-box">
+    <div class="est-rows"></div>
+    <div class="est-info"></div>
+    <div class="controls">
+      <button class="btn primary" data-act="one">采样一次</button>
+      <button class="btn" data-act="many">再采 100 次</button>
+      <button class="btn" data-act="reset">重置</button>
+    </div>
+  </div>
+  <figcaption>图 4　单次采样的梯度估计很吵，但平均值会收敛到真实梯度（绿色向右表示推高，红色向左表示压低；右列刻度放大了 5 倍）</figcaption>
+</figure>
+
+<p>点几次“采样一次”，你会看到：</p>
+
+<ul>
+  <li>采到失败的补丁时，“这一次的估计”整行都是空的：\(R = 0\)，梯度为 0。</li>
+  <li>采到成功的补丁时，它被推高，其他三个都被压低，<strong>包括另一个同样成功的补丁</strong>。这是因为概率此消彼长：推高一个，就一定压低其他。</li>
+</ul>
+
+<p>单看一次，估计和真实梯度差得很远。但多点几次“再采 100 次”，平均值会越来越接近黄色竖线：两个成功的补丁被推高，两个失败的被压低。</p>
+
+<h3><span class="num">6.2</span>真实梯度是什么</h3>
+
+<p>这个例子小到可以直接算出真实梯度。4 个补丁的概率是 \(p = (0.2, 0.3, 0.1, 0.4)\)，奖励是 \(R = (1, 0, 1, 0)\)。通过率 \(J = 0.2 + 0.1 = 0.3\)。</p>
+
+<p>对第 \(k\) 个补丁的 logit 求导，可以化简为：</p>
+
+$$\frac{\partial J}{\partial z_k} = p_k \,(R_k - J)$$
+
+<p>代入数值：</p>
+
+<table>
+  <thead><tr><th>补丁</th><th>\(p_k\)</th><th>\(R_k\)</th><th>\(p_k(R_k - J)\)</th></tr></thead>
+  <tbody>
+    <tr><td><code>if not xs: return 0</code></td><td>0.2</td><td>1</td><td class="c-up">+0.14</td></tr>
+    <tr><td><code>if xs is None: return 0</code></td><td>0.3</td><td>0</td><td class="c-down">−0.09</td></tr>
+    <tr><td><code>return … if xs else 0</code></td><td>0.1</td><td>1</td><td class="c-up">+0.07</td></tr>
+    <tr><td><code>return sum(xs) / len(xs)</code></td><td>0.4</td><td>0</td><td class="c-down">−0.12</td></tr>
+  </tbody>
+</table>
+
+<p>这张表里藏着一个以后会反复出现的结构：<strong>\(R_k - J\)</strong>，也就是“这个补丁的得分，比平均水平高多少”。比平均好的被推高，比平均差的被压低，力度再乘以它当前的概率。</p>
+
+<p>真实梯度里已经有了“和平均水平比较”的意思，但 REINFORCE 的单次估计里没有，它只用了 \(R\) 本身。所以单次估计里，失败的补丁永远是 0，成功的补丁会把所有其他补丁都压低。只有平均很多次之后，“和平均比较”的效果才显现出来。这就是 REINFORCE 噪声大的原因，第 8 节会继续讨论。</p>
+
+<h3><span class="num">6.3</span>无偏，但方差大</h3>
+
+<p>用统计的语言说：REINFORCE 的梯度估计是<strong>无偏</strong>的，它的期望恰好等于真实梯度；但它的<strong>方差</strong>很大，单次估计离真实值可能很远。</p>
+
+<p>方差大意味着两件事。第一，需要更多样本才能得到可靠的方向，每个样本都要模型完整生成一次再跑测试，成本很高。第二，如果样本不够，每一步更新的方向都在乱跳，训练会很慢，甚至不稳定。</p>
+
+<p>后面要讲的大部分改进，比如基线、优势值、价值模型，核心目标都是同一个：<strong>在保持无偏的前提下，把方差降下来。</strong></p>
+
+<!-- ============================================================ -->
+<h2 id="s7"><span class="num">7</span>训练一个修 bug 的模型</h2>
+
+<p>现在把前面的东西全部用上。下图是模型所有可能写出的补丁。它先选第一个 token（<code>if</code>、<code>return</code> 或 <code>try</code>），再选后面的写法。线的粗细表示概率；每个补丁右边标着测试结果，以及模型写出它的概率，也就是整条路径上概率的乘积。</p>
+
+<p>先点几次“采样一次”，逐步看清楚一次更新发生了什么。然后点“连续训练 200 步”，看通过率怎么变化。</p>
+
+<figure class="viz" id="viz-reinforce">
+  <div class="viz-box">
+    <div class="tree-wrap">
+      <svg class="tree-svg" viewBox="0 0 600 286" role="img" aria-label="修 bug 的补丁概率树"></svg>
+      <div class="side">
+        <div class="big"></div>
+        <div class="readout step-readout"></div>
+        <div class="log"></div>
+      </div>
+    </div>
+    <svg class="curve" viewBox="0 0 560 130" preserveAspectRatio="none" aria-label="通过率曲线"></svg>
+    <div class="controls">
+      <button class="btn primary" data-act="one">采样一次</button>
+      <button class="btn" data-act="many">连续训练 200 步</button>
+      <button class="btn" data-act="reset">重置</button>
+      <label>失败时的奖励
+        <select data-opt="reward">
+          <option value="zero">R = 0</option>
+          <option value="half">R = 0.5</option>
+        </select>
+      </label>
+      <label>初始模型
+        <select data-opt="start">
+          <option value="normal">普通</option>
+          <option value="cold">几乎只会写错误补丁</option>
+        </select>
+      </label>
+    </div>
+  </div>
+  <figcaption>图 5　REINFORCE 修 bug：采样一个补丁 → 跑测试 → 按奖励推高这条路径（学习率 0.5）</figcaption>
+</figure>
+
+<h3><span class="num">7.1</span>一次更新的细节</h3>
+
+<p>以采到 <code>return sum(xs) / len(xs) if xs else 0</code> 为例，它通过了测试，\(R = 1\)。这条路径上有两个决策点：</p>
+
+<ul>
+  <li>第一步选了 <code>return</code>。按 5.6 节的公式，<code>return</code> 的 logit 增加 \(0.5 \times (1 - 0.55) = 0.225\)，<code>if</code> 和 <code>try</code> 分别减少 \(0.5 \times 0.30\) 和 \(0.5 \times 0.15\)。更新后，第一步的分布从 \((0.30, 0.55, 0.15)\) 变成约 \((0.24, 0.63, 0.13)\)。</li>
+  <li>第二步选了 “<code>… if xs else 0</code>” 这个分支。它的概率从 0.25 变成约 0.41。</li>
+</ul>
+
+<p>整条路径的概率从 \(0.55 \times 0.25 \approx 0.14\) 升到约 \(0.63 \times 0.41 \approx 0.26\)，几乎翻倍。通过率从 41% 升到约 49%。</p>
+
+<p>注意一个副作用：第一步的 <code>return</code> 被推高了，但 <code>return</code> 下面还有一个错误的分支 <code>return sum(xs) / len(xs)</code>。它的路径概率是 \(0.63 \times 0.59 \approx 0.37\)，比更新前的 \(0.55 \times 0.75 \approx 0.41\) 低了一些，但它的“入口”变宽了。一个好结果把沿途所有选择都推高，而其中的某些选择也通往坏结果。这就是 5.6 节说的功劳分配问题，在这个小例子里已经能看到。</p>
+
+<h3><span class="num">7.2</span>连续训练</h3>
+
+<p>在默认设置下连续训练，通过率会从 41% 左右一路涨到接近 100%。整个过程中，<strong>我们从没告诉模型正确答案是什么</strong>。它只是不断地写，被打分，强化写对的那些。</p>
+
+<p>多重置几次会发现，最后胜出的写法每次可能不一样，有时是 <code>if not xs</code>，有时是 <code>try</code>，有时是 <code>return … if xs else 0</code>。哪一种胜出，取决于早期碰巧先采到了谁：先被推高的写法，之后更容易被采到，于是被推得更高。RL 不在乎用哪种写法，只在乎测试能不能过。这正好对应 3.1 节的问题：正确答案不止一个时，RL 不会压低其他正确写法。</p>
+
+<p>但这个现象也有另一面：一旦某种写法占据主导，其他正确写法的概率会被持续压低，最终几乎消失。模型的输出变得越来越单一。这叫<strong>熵坍缩</strong>（entropy collapse），在大模型 RL 里是一个真实存在的问题：模型失去了多样性，也就失去了继续探索的能力。</p>
+
+<div class="aside">
+<span class="aside-title">旁注：这个模型简化在哪里</span>
+<p>为了能画出来，图 5 里每个分叉点有自己独立的 logit，互不影响。真实模型所有位置共享同一套参数（2.5 节），推高一处会牵连别处。此外，真实的补丁有成百上千种，而不是 5 种。但核心机制完全一样：采样、打分、按奖励推高这条路径上每个被选中的 token。</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="s8"><span class="num">8</span>REINFORCE 的三个问题</h2>
+
+<p>REINFORCE 能工作，但很粗糙。改一改图 5 的设置，可以看到三个问题。</p>
+
+<h3><span class="num">8.1</span>失败的尝试被浪费了</h3>
+
+<p>默认设置下，模型写出错误补丁时 \(R = 0\)，梯度乘以 0，什么都不发生。图 5 的日志里会写“什么都不变”。</p>
+
+<p>这很浪费。一次失败其实包含信息：“这样写不行”。如果能利用这个信息，把错误补丁的概率压低，学习会快得多。可 REINFORCE 只会推高，不会主动压低。错误补丁的概率下降，只是因为别的补丁被推高后，它被动地分到了更少的概率。</p>
+
+<p>在初始通过率很低的时候，这个问题尤其严重：绝大多数采样都失败，绝大多数计算都白费了。</p>
+
+<h3><span class="num">8.2</span>绝对分数没有意义</h3>
+
+<p>把“失败时的奖励”改成 0.5 再训练。这相当于告诉模型：失败也有 0.5 分。</p>
+
+<p>单步观察会看到，错误补丁也被推高了，日志会提示“错误补丁也拿到了正奖励，被推高了”。训练最终还是会收敛，因为成功的补丁被推得更多（1 对 0.5），但过程更慢、更抖。</p>
+
+<p>问题在于：奖励的<strong>绝对值</strong>本身没有意义。0.5 分算好还是算差？如果平均水平是 0.3，那 0.5 是好的；如果平均是 0.8，那 0.5 就是差的。真正有用的信息是：<strong>这一次比平时好还是差。</strong></p>
+
+<p>6.2 节的真实梯度里，已经出现了 \(R_k - J\) 这个结构。这启发了一个简单的改进：不直接用 \(R\)，而用 \(R\) 减去一个“平均水平” \(b\)：</p>
+
+$$\mathcal{L} = -\,(R - b) \sum_{t} \log \pi_\theta(a_t \mid s_t)$$
+
+<p>这样，比平均好的轨迹（\(R &gt; b\)）被推高，比平均差的（\(R &lt; b\)）被压低。失败也能提供信号了，8.1 节的问题也一起解决了。</p>
+
+<p>但减去一个 \(b\)，会不会改变梯度的方向，让我们优化错了目标？不会。只要 \(b\) 不依赖于采到的是哪条轨迹，减去它不改变梯度的期望。证明只需要一行：</p>
+
+$$\mathbb{E}_{\tau \sim \pi_\theta}\big[\, b \, \nabla_\theta \log \pi_\theta(\tau) \,\big] = b \sum_\tau \pi_\theta(\tau) \frac{\nabla_\theta \pi_\theta(\tau)}{\pi_\theta(\tau)} = b\, \nabla_\theta \sum_\tau \pi_\theta(\tau) = b\, \nabla_\theta 1 = 0$$
+
+<p>最后一步用到了：所有轨迹的概率加起来永远是 1，对常数求导是 0。直观地说，所有概率的总和不能变，所以“把所有轨迹一起推高”这件事在期望上什么都没做。</p>
+
+<p>减去 \(b\) 不改变期望，却能大幅降低方差。这个 \(b\) 叫做<strong>基线</strong>（baseline），\(R - b\) 叫做<strong>优势值</strong>（advantage）。怎样选 \(b\) 最好，是下一篇的起点，GRPO 和 PPO 的主要区别也在这里。</p>
+
+<h3><span class="num">8.3</span>采不到就学不会</h3>
+
+<p>把“初始模型”改成“几乎只会写错误补丁”。这时模型写出正确补丁的总概率只有约 4%。</p>
+
+<p>连续训练几次，你会看到通过率在很长时间里几乎不动，然后在某个时刻突然起飞。原因很简单：模型很难采到正确的补丁，也就很难得到任何奖励。没有奖励，就没有梯度。直到某一次运气好采到了正确补丁，它被推高，之后更容易被采到，形成正反馈，曲线才开始上升。</p>
+
+<p>这揭示了强化学习的一个根本性质：</p>
+
+<blockquote><p>强化学习只能强化模型已经能做到、只是做得不稳定的事情。模型从来写不出来的东西，永远拿不到奖励，也就永远学不会。</p></blockquote>
+
+<p>有一个常用的指标可以衡量“能不能采到”：<strong>pass@k</strong>，即采样 \(k\) 次至少有一次成功的概率。如果单次成功率是 \(p\)，那么：</p>
+
+$$\text{pass@}k = 1 - (1 - p)^k$$
+
+<p>单次成功率 4% 时，pass@1 是 4%，pass@16 约 48%，pass@64 约 93%。也就是说，即使模型平均表现很差，只要对同一道题多采几次，还是有机会采到正确答案，RL 就有东西可以学。</p>
+
+<p>这个性质直接决定了大模型训练的几个惯例：</p>
+
+<ul>
+  <li><strong>先 SFT，再 RL。</strong>SFT 负责把模型带到“偶尔能做对”的位置，RL 负责把“偶尔”变成“稳定”。没有 SFT 冷启动，很多任务上 RL 根本启动不了。</li>
+  <li><strong>筛选题目难度。</strong>模型永远做不对的题，采多少次都没有奖励，等于白算。模型每次都能做对的题，也没什么可学的（下一篇会看到，加了基线之后它的信号恰好是 0）。最有价值的，是模型有时对、有时错的题。</li>
+  <li><strong>每道题采多个样本。</strong>这既是为了提高采到正确答案的机会，也是为了估计“平均水平” \(b\)。下一篇讲 GRPO 时会看到，这两个目的是同一件事。</li>
+</ul>
+
+<!-- ============================================================ -->
+<h2 id="s9"><span class="num">9</span>完整的训练循环</h2>
+
+<p>把前面的内容写成代码。下面是一个最简的 REINFORCE 训练循环，形式上接近 PyTorch，省略了工程细节：</p>
+
+<pre><code>for step in range(num_steps):
+    prompts = sample_tasks(batch_size)
+
+    # 1. 采样：模型自己写，不需要梯度
+    with torch.no_grad():
+        completions = policy.generate(prompts, temperature=1.0)
+
+    # 2. 打分：跑测试，得到每条轨迹的奖励
+    rewards = torch.tensor([run_tests(p, c) for p, c in zip(prompts, completions)])
+
+    # 3. 重新计算 log 概率：这一次需要梯度
+    #    logp 形状为 [batch, seq_len]，mask 只保留模型生成的 token
+    logp = policy.token_log_probs(prompts, completions)
+
+    # 4. REINFORCE loss：每个 token 的 log 概率乘以整条轨迹的奖励
+    loss = -(rewards[:, None] * logp * mask).sum() / batch_size
+
+    loss.backward()
+    optimizer.step()
+    optimizer.zero_grad()</code></pre>
+
+<p>逐行对照前面的内容：</p>
+
+<ul>
+  <li><strong>第 1 步</strong>是 4.4 节说的“数据来自模型自己”。生成时不需要梯度，可以用专门的推理引擎来做，速度快得多。</li>
+  <li><strong>第 2 步</strong>是 5.1 节说的“断开的路径”。测试在计算图之外，<code>rewards</code> 只是一组普通的数。</li>
+  <li><strong>第 3 步</strong>重新做一次前向，算出每个被选中 token 的 \(\log \pi\)。这一步和 SFT 计算 loss 的过程完全一样，只是 token 来自模型自己的输出。</li>
+  <li><strong>第 4 步</strong>就是 5.5 节的 loss。<code>rewards[:, None]</code> 把每条轨迹的奖励广播到它的所有 token 上，对应 5.6 节说的“每个 token 乘以同一个 R”。<code>mask</code> 把 prompt 部分排除在外，因为 prompt 不是模型的动作。</li>
+</ul>
+
+<p>这个循环里有两个地方值得提前注意。</p>
+
+<p><strong>生成和训练是两套计算。</strong>第 1 步用推理引擎生成，第 3 步用训练框架重新算概率。理论上两者算出的概率应该完全一致，但实际上，不同的计算内核、数值精度、批处理方式都可能带来细微差别。在大规模训练中，这种差别会累积成训练不稳定。前沿实验室在“训练和推理的数值对齐”上花了很大力气，原因就在这里。</p>
+
+<p><strong>生成很慢，而且长短不一。</strong>第 1 步通常占了整个循环的大部分时间。如果每批样本必须全部生成完才能训练，最长的那条会拖住所有人。agent 任务里，一条轨迹可能要跑几十分钟，这个问题会变得非常尖锐，异步训练就是为它而生的。</p>
+
+<!-- ============================================================ -->
+<h2 id="s10"><span class="num">10</span>小结与练习</h2>
+
+<h3><span class="num">10.1</span>小结</h3>
+
+<ul>
+  <li>语言模型在每个位置输出一个概率分布。一段输出的概率是每个位置概率的乘积，取对数后变成求和。</li>
+  <li>SFT 最小化标准答案的负对数概率。对 logit 的梯度是 \(\mathbb{1}[i = k] - p_i\)：推高标准答案，按概率比例压低其他 token。</li>
+  <li>SFT 需要唯一的标准答案，上限是示范者，而且只在“前面都对”的状态下训练，导致误差在长序列上累积。</li>
+  <li>强化学习的目标是最大化期望奖励 \(J(\theta) = \mathbb{E}[R]\)。奖励来自外部，不可导。</li>
+  <li>策略梯度定理把梯度写成 \(\mathbb{E}[R \cdot \nabla \log \pi]\)：奖励只是权重，梯度来自模型自己的对数概率。环境的转移概率与参数无关，在梯度中消失。</li>
+  <li>REINFORCE 用单次采样估计这个期望。它等价于对模型自己的输出做 SFT，并按奖励加权。估计是无偏的，但方差很大。</li>
+  <li>REINFORCE 有三个问题：失败样本不提供信号，奖励的绝对值没有意义，采不到正确答案就学不会。前两个可以靠减去基线解决，第三个需要 SFT 冷启动和合适的题目难度。</li>
+</ul>
+
+<h3><span class="num">10.2</span>练习</h3>
+
+<div class="ex">
+<span class="ex-title">练习 1</span>　logit 为 \((2, 1, 0)\) 和 \((12, 11, 10)\) 时，softmax 概率分别是多少？logit 为 \((4, 2, 0)\) 呢？
+<details><summary>参考答案</summary><div>
+<p>前两组概率相同，都约为 \((0.665, 0.245, 0.090)\)，因为它们只差一个常数。第三组约为 \((0.867, 0.117, 0.016)\)：logit 差距翻倍，相当于温度减半，分布变得更尖。</p>
+</div></details>
+</div>
+
+<div class="ex">
+<span class="ex-title">练习 2</span>　某位置的概率是 \(p = (0.5, 0.3, 0.2)\)，标准答案是第二个 token。写出交叉熵 loss 对 3 个 logit 的负梯度，并验证它们的和为 0。为什么和一定是 0？
+<details><summary>参考答案</summary><div>
+<p>负梯度是 \((-0.5,\; 0.7,\; -0.2)\)，和为 0。因为 softmax 对“所有 logit 加同一个常数”不敏感，loss 在这个方向上没有变化，所以梯度在这个方向上的分量（也就是所有分量之和）必须是 0。</p>
+</div></details>
+</div>
+
+<div class="ex">
+<span class="ex-title">练习 3</span>　如果不管模型写什么，奖励都是 1，REINFORCE 的期望梯度是多少？单次采样的梯度呢？这说明了什么？
+<details><summary>参考答案</summary><div>
+<p>期望梯度是 0，由 8.2 节的推导，\(\mathbb{E}[\nabla \log \pi] = 0\)。但单次采样的梯度不是 0：它会推高刚才采到的那条轨迹。所以即使奖励完全没有信息，REINFORCE 也会让模型随机地朝某个方向漂移，这就是方差的来源。减去基线 \(b = 1\) 后，每次的梯度都恰好是 0。</p>
+</div></details>
+</div>
+
+<div class="ex">
+<span class="ex-title">练习 4</span>　把奖励改成“通过得 +1，失败得 −1”，和“通过得 1，失败得 0”相比，有什么区别？
+<details><summary>参考答案</summary><div>
+<p>新奖励 \(R' = 2R - 1 = 2(R - 0.5)\)，相当于原奖励减去基线 0.5，再把学习率乘以 2。失败的轨迹现在会被主动压低。如果模型的通过率恰好在 50% 附近，0.5 是一个不错的基线；但如果通过率是 5% 或 95%，这个固定的基线就离平均水平很远，效果会差很多。这正是需要自适应基线的原因。</p>
+</div></details>
+</div>
+
+<div class="ex">
+<span class="ex-title">练习 5</span>　模型在某道题上的单次通过率是 2%。每道题采 16 个样本，至少采到一个正确答案的概率是多少？如果想让这个概率超过 90%，大约需要采多少个？
+<details><summary>参考答案</summary><div>
+<p>\(1 - 0.98^{16} \approx 27.6\%\)。要超过 90%，需要 \(0.98^k &lt; 0.1\)，即 \(k &gt; \ln 0.1 / \ln 0.98 \approx 114\)。每个样本都要完整生成并跑测试，这说明了为什么太难的题在 RL 中性价比很低。</p>
+</div></details>
+</div>
+
+<div class="ex">
+<span class="ex-title">练习 6</span>　在 agent 任务中，模型调用搜索工具，工具返回一段网页内容。为什么策略梯度里不需要对“工具返回什么”求导？如果把工具返回的内容也算进 \(\sum_t \log \pi_\theta\)，会发生什么？
+<details><summary>参考答案</summary><div>
+<p>工具的输出由环境决定，它的概率与 \(\theta\) 无关，在 5.4 节的旁注里已经看到它在梯度中消失。如果把工具返回的 token 也算进 loss，就等于让模型去“学习写出这段网页内容”，并按奖励加权。这不是模型的动作，学它没有意义，还会干扰模型真正该学的东西。所以实际训练中要用 mask 把这部分排除，和第 9 节代码里排除 prompt 是同一个道理。</p>
+</div></details>
+</div>
+
+</article>
+
+<nav class="pager">
+  <span class="muted"><small>上一篇</small>无</span>
+  <span class="muted" style="text-align:right"><small>下一篇</small>从奖励到 Agent（二）：学习信号从哪里来</span>
+</nav>
+</main>
+
+<footer class="footer"><div class="footer-in">© 2026 YW</div></footer>
+
+<script src="assets/common.js"></script>
+<script src="assets/part1.js"></script>
+</body>
+</html>

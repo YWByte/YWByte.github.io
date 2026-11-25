@@ -5,6 +5,8 @@ export async function getPosts() {
   return posts.sort((a, b) => b.data.date.valueOf() - a.data.date.valueOf());
 }
 
+export const postHref = (p: { id: string; data: { link?: string } }) => p.data.link ?? `/blog/${p.id}/`;
+
 export const formatDate = (d: Date) => d.toISOString().slice(0, 10);
 
 // 中文按字数、英文按词数估算，约 400 字/分钟

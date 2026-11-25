@@ -1,11 +1,11 @@
 ---
 import type { CollectionEntry } from 'astro:content';
-import { formatDate, readingTime } from '../utils';
+import { formatDate, readingTime, postHref } from '../utils';
 
 const { post } = Astro.props as { post: CollectionEntry<'blog'> };
 ---
-<a class="item" href={`/blog/${post.id}/`}>
-  <div class="meta"><span class="tag">{post.data.tag}</span>{formatDate(post.data.date)} · {readingTime(post.body)} 分钟</div>
+<a class="item" href={postHref(post)}>
+  <div class="meta"><span class="tag">{post.data.tag}</span>{formatDate(post.data.date)} · {post.data.minutes ?? readingTime(post.body)} 分钟</div>
   <h2>{post.data.title}</h2>
   <p>{post.data.description}</p>
 </a>

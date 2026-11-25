@@ -5,7 +5,7 @@ import { AUTHOR } from '../../consts';
 import { getPosts, formatDate, readingTime } from '../../utils';
 
 export async function getStaticPaths() {
-  const posts = await getPosts();
+  const posts = (await getPosts()).filter((p) => !p.data.link);
   // 列表按时间倒序，所以 i+1 是更早的“上一篇”
   return posts.map((post, i) => ({
     params: { id: post.id },

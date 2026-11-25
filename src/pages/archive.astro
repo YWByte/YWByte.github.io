@@ -1,6 +1,6 @@
 ---
 import Base from '../layouts/Base.astro';
-import { getPosts, formatDate } from '../utils';
+import { getPosts, formatDate, postHref } from '../utils';
 
 const posts = await getPosts();
 const years = [...new Set(posts.map((p) => p.data.date.getFullYear()))];
@@ -12,7 +12,7 @@ const years = [...new Set(posts.map((p) => p.data.date.getFullYear()))];
       <section>
         <h2 class="year">{y}</h2>
         {posts.filter((p) => p.data.date.getFullYear() === y).map((p) => (
-          <a class="row" href={`/blog/${p.id}/`}><time>{formatDate(p.data.date).slice(5)}</time>{p.data.title}</a>
+          <a class="row" href={postHref(p)}><time>{formatDate(p.data.date).slice(5)}</time>{p.data.title}</a>
         ))}
       </section>
     ))}

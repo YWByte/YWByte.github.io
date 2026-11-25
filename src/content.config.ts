@@ -9,6 +9,9 @@ const blog = defineCollection({
     date: z.coerce.date(),
     tag: z.string().default('随笔'),
     draft: z.boolean().default(false),
+    // 独立 HTML 页面（含交互图）放在 public/ 下，列表直接链接过去
+    link: z.string().optional(),
+    minutes: z.number().optional(),
   }),
 });
 

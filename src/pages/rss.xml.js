@@ -1,6 +1,6 @@
 import rss from '@astrojs/rss';
 import { SITE_TITLE, SITE_DESCRIPTION } from '../consts';
-import { getPosts } from '../utils';
+import { getPosts, postHref } from '../utils';
 
 export async function GET(context) {
   const posts = await getPosts();
@@ -12,7 +12,7 @@ export async function GET(context) {
       title: p.data.title,
       description: p.data.description,
       pubDate: p.data.date,
-      link: `/blog/${p.id}/`,
+      link: postHref(p),
     })),
   });
 }
