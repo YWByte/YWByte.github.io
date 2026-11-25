@@ -312,29 +312,68 @@ $$\mathcal{L} = -\log p_{\text{target}}$$
 
 <h3><span class="num">2.2</span>梯度长什么样</h3>
 
-<p>反向传播从 logit 开始。我们来求 loss 对每个 logit 的导数。把 softmax 代进去：</p>
+<p>训练要回答的问题是：<strong>每个 token 的 logit 应该往上调还是往下调，各调多少？</strong>这正是 loss 对每个 logit 的导数 \(\partial \mathcal{L} / \partial z_i\) 给出的信息。算出它之后，反向传播才能把信号继续传给 \(h\)、\(W\) 和 Transformer 内部的参数。下面一步一步把它算出来。</p>
 
-$$\mathcal{L} = -\log \frac{e^{z_k}}{\sum_j e^{z_j}} = -z_k + \log \sum_j e^{z_j}$$
+<p><strong>第一步：把 loss 写成 logit 的函数。</strong>记标准答案的下标为 \(k\)，在我们的例子里 \(k\) 就是 <code>if</code>。softmax 给出 \(p_k = e^{z_k} / \sum_j e^{z_j}\)，代入 loss：</p>
 
-<p>其中 \(k\) 是标准答案的下标。第二项对 \(z_i\) 求导：</p>
+$$\mathcal{L} = -\log \frac{e^{z_k}}{\sum_j e^{z_j}}$$
+
+<p>利用 \(\log(a/b) = \log a - \log b\) 拆开，再用 \(\log e^{z_k} = z_k\)：</p>
+
+$$\mathcal{L} = -z_k + \log \sum_j e^{z_j}$$
+
+<p>拆开以后，两项各有清楚的含义。第一项 \(-z_k\) 只和标准答案有关：标准答案的 logit 越大，loss 越小。第二项 \(\log \sum_j e^{z_j}\) 和所有 token 都有关：所有 token 的整体分数越高，loss 越大，其中分数高的 token 贡献最大，因为指数会放大它们。所以 loss 本身已经说明了训练要做什么：<strong>抬高标准答案，压低其他竞争者。</strong></p>
+
+<p><strong>第二步：分别对两项求导。</strong>我们要求 loss 对任意一个 logit \(z_i\) 的导数，\(i\) 可以是 <code>if</code>、<code>return</code>、<code>try</code> 中的任何一个。</p>
+
+<p>第一项 \(-z_k\) 里只有标准答案的 logit。如果 \(i = k\)，正在看的就是 <code>if</code> 本身，导数是 \(-1\)；如果 \(i \neq k\)，比如正在看 <code>return</code>，那么 \(-z_k\) 里根本没有 \(z_{\texttt{return}}\)，导数是 0。</p>
+
+<p>第二项先把分母记作 \(S = \sum_j e^{z_j}\)，它就是 \(\log S\)。由链式法则：</p>
+
+$$\frac{\partial}{\partial z_i} \log S = \frac{1}{S} \cdot \frac{\partial S}{\partial z_i}$$
+
+<p>\(S\) 是所有 \(e^{z_j}\) 的和。对 \(z_i\) 求导时，只有 \(e^{z_i}\) 这一项会变，其余都是常数，所以 \(\partial S / \partial z_i = e^{z_i}\)。代回去：</p>
 
 $$\frac{\partial}{\partial z_i} \log \sum_j e^{z_j} = \frac{e^{z_i}}{\sum_j e^{z_j}} = p_i$$
 
-<p>第一项只有在 \(i = k\) 时才有导数 \(-1\)。合起来：</p>
+<p>最后一个等号正是 softmax 的定义。也就是说，<strong>分母那一项对某个 logit 的导数，恰好是这个 token 当前的概率。</strong></p>
+
+<p><strong>第三步：合起来。</strong>两项导数相加：</p>
 
 $$\frac{\partial \mathcal{L}}{\partial z_i} = p_i - \mathbb{1}[i = k]$$
 
-<p>梯度下降沿着负梯度方向走，所以 logit 的变化方向是：</p>
+<p>\(\mathbb{1}[i = k]\) 叫做指示函数：括号里的条件成立时等于 1，不成立时等于 0。所以这个式子对 <code>if</code> 是 \(p_{\texttt{if}} - 1\)，对其他 token 就是它们自己的概率 \(p_i\)。</p>
+
+<p>还有一种更整齐的写法。把标准答案写成一个 one-hot 的目标分布 \(y = (1, 0, 0, 0, 0)\)，那么所有分量合在一起就是：</p>
+
+$$\frac{\partial \mathcal{L}}{\partial z} = p - y$$
+
+<p>梯度就是<strong>模型当前预测的分布减去目标分布</strong>。预测和目标差多少，就修正多少。</p>
+
+<p><strong>第四步：取负号得到更新方向。</strong>梯度指向 loss 增大的方向，梯度下降要往反方向走，所以 logit 的变化方向是：</p>
 
 $$-\frac{\partial \mathcal{L}}{\partial z_i} = \begin{cases} 1 - p_k & i = k \text{（标准答案）} \\ -p_i & i \neq k \text{（其他 token）} \end{cases}$$
 
-<p>这个结果值得多看一会儿，因为它会在本篇反复出现。用大白话说：</p>
+<p><strong>代入例子。</strong>光标处的概率是 \(p = (0.29, 0.52, 0.11, 0.05, 0.03)\)，标准答案是 <code>if</code>：</p>
 
-<ul>
-  <li><strong>标准答案被往上推</strong>，力度是它“离 1 还差多少”。已经很确定的答案，几乎不再被推。</li>
-  <li><strong>其他 token 被往下压</strong>，力度和它们当前的概率成正比。模型越相信某个错误选项，它被压得越狠；本来就几乎不会选的 token，几乎不受影响。</li>
-  <li>所有分量加起来是 0：\((1 - p_k) - \sum_{i \neq k} p_i = 0\)。这和 1.1 节说的“只有差值有意义”是一回事，梯度不会浪费在“所有 logit 一起变大”这种无效方向上。</li>
-</ul>
+<table>
+  <thead><tr><th>token</th><th>当前概率 \(p_i\)</th><th>更新方向 \(\mathbb{1}[i=k] - p_i\)</th><th>含义</th></tr></thead>
+  <tbody>
+    <tr><td><code>if</code></td><td>0.29</td><td class="c-up">\(1 - 0.29 = +0.71\)</td><td>往上推</td></tr>
+    <tr><td><code>return</code></td><td>0.52</td><td class="c-down">\(-0.52\)</td><td>被压得最多</td></tr>
+    <tr><td><code>try</code></td><td>0.11</td><td class="c-down">\(-0.11\)</td><td>被轻轻压一下</td></tr>
+    <tr><td><code>pass</code></td><td>0.05</td><td class="c-down">\(-0.05\)</td><td>几乎不动</td></tr>
+    <tr><td><code>#</code></td><td>0.03</td><td class="c-down">\(-0.03\)</td><td>几乎不动</td></tr>
+  </tbody>
+</table>
+
+<p>这个结果会在本篇反复出现，值得逐条读懂。</p>
+
+<p><strong>标准答案被往上推，力度是 \(1 - p_k\)。</strong>\(1 - p_k\) 是标准答案离“概率等于 1”还差多少。<code>if</code> 现在是 0.29，还差 0.71，所以被大幅往上推；如果它已经是 0.99，只差 0.01，就几乎不再变化。模型已经学会的东西，梯度会自动变小，不需要人为干预。</p>
+
+<p><strong>其他 token 被往下压，力度是它们当前的概率 \(p_i\)。</strong><code>return</code> 的概率是 0.52，它是 <code>if</code> 最主要的竞争者，所以被压得最多。<code>#</code> 只有 0.03，本来就很少被选中，压它也没什么意义，所以几乎不受影响。换句话说：<strong>谁从标准答案那里抢走的概率越多，谁就被压得越狠。</strong></p>
+
+<p><strong>所有分量加起来是 0。</strong>标准答案增加 0.71，其他 token 一共减少 \(0.52 + 0.11 + 0.05 + 0.03 = 0.71\)，正好抵消。一般地，\((1 - p_k) - \sum_{i \neq k} p_i = 1 - \sum_i p_i = 0\)。原因是概率总和固定为 1，像一块大小不变的饼，训练只会把错误 token 手里的那份挪给标准答案。这和 1.1 节说的“只有 logit 之间的差值有意义”是同一件事：所有 logit 一起加上同一个数，概率完全不变，对降低 loss 毫无帮助，所以梯度里也不会包含这个方向。</p>
 
 <h3><span class="num">2.3</span>一步更新</h3>
 
@@ -492,7 +531,43 @@ $$(1 - \varepsilon)^T$$
 
 $$J(\theta) = \mathbb{E}_{\tau \sim \pi_\theta}\big[R(\tau)\big]$$
 
-<p>\(\tau \sim \pi_\theta\) 的意思是：轨迹 \(\tau\) 是从模型 \(\pi_\theta\) 中采样出来的。在我们的例子里，奖励只有 0 和 1，所以 \(J\) 就是<strong>模型的测试通过率</strong>。</p>
+<p>式子里有三样东西。\(\tau\) 是模型完整写出的一段代码，也就是一条轨迹。\(\pi_\theta(\tau)\) 是参数为 \(\theta\) 的模型写出这段代码的概率。\(R(\tau)\) 是这段代码的奖励，通过测试得 1，没通过得 0。下标 \(\tau \sim \pi_\theta\) 读作“\(\tau\) 从模型的分布中采样得到”。整个式子的意思是：<strong>让模型按自己的概率写代码，平均下来能拿到多少奖励。</strong></p>
+
+<p><strong>期望怎么算。</strong>把期望符号展开，就是把每一种可能的代码列出来，用“写出它的概率”乘以“它得到的奖励”，再全部加起来：</p>
+
+$$J(\theta) = \sum_{\tau} \pi_\theta(\tau)\, R(\tau)$$
+
+<p>这和掷骰子求平均点数是同一种算法：\(\tfrac16 \times 1 + \tfrac16 \times 2 + \cdots + \tfrac16 \times 6 = 3.5\)。不同的只是，这里骰子的每一面换成了一段代码，每一面的概率由模型决定，每一面的“点数”由测试决定。</p>
+
+<p>假设模型在光标处只会写出 4 种补丁（第 6 节还会用到这组数字）：</p>
+
+<table>
+  <thead><tr><th>模型写出的代码 \(\tau\)</th><th>概率 \(\pi_\theta(\tau)\)</th><th>奖励 \(R(\tau)\)</th><th>乘积</th></tr></thead>
+  <tbody>
+    <tr><td><code>if not xs: return 0</code></td><td>0.2</td><td>1</td><td>0.2</td></tr>
+    <tr><td><code>if xs is None: return 0</code></td><td>0.3</td><td>0</td><td>0</td></tr>
+    <tr><td><code>return … if xs else 0</code></td><td>0.1</td><td>1</td><td>0.1</td></tr>
+    <tr><td><code>return sum(xs) / len(xs)</code></td><td>0.4</td><td>0</td><td>0</td></tr>
+  </tbody>
+</table>
+
+<p>把最后一列加起来，\(J = 0.2 + 0.1 = 0.3\)。奖励只有 0 和 1 时，失败代码的乘积都是 0，期望就只剩“能通过的代码的概率之和”。所以 \(J = 0.3\) 有一个很直接的含义：<strong>模型随便写一次，有 30% 的概率通过测试。</strong>在这个例子里，期望奖励就是通过率。</p>
+
+<p>表里每段代码的概率，来自 1.3 节：整段代码的概率等于每一步所选 token 的概率连乘，而每一步的概率又是第 0 节那条“\(h\) → logit → softmax”的链路算出来的。</p>
+
+<p><strong>\(J\) 为什么依赖 \(\theta\)。</strong>在 \(\sum_\tau \pi_\theta(\tau) R(\tau)\) 里，\(R(\tau)\) 是测试给出的结果，和参数无关：同一段代码，不管哪个模型写出来，测试结果都一样。依赖参数的只有 \(\pi_\theta(\tau)\)。所以训练无法改变某段代码“好不好”，只能改变模型“多常写出它”。</p>
+
+<p>比如把 <code>return sum(xs) / len(xs)</code> 的概率从 0.4 降到 0.2，挪出来的 0.2 加给 <code>if not xs: return 0</code>：</p>
+
+$$J = 0.4 \times 1 + 0.3 \times 0 + 0.1 \times 1 + 0.2 \times 0 = 0.5$$
+
+<p>通过率从 30% 涨到了 50%。<strong>最大化期望奖励，就是把概率从得分低的代码挪到得分高的代码上。</strong></p>
+
+<p><strong>实际中只能估计。</strong>这个例子只有 4 种代码，可以直接加完。真实模型能写出的代码多得无法枚举，所以实际训练时让模型采样写 \(N\) 次，用平均奖励来估计：</p>
+
+$$J(\theta) \approx \frac{1}{N} \sum_{n=1}^{N} R(\tau_n)$$
+
+<p>写 10 次通过 3 次，就估计 \(J \approx 0.3\)。再写 10 次，可能通过 2 次，也可能 4 次，所以这个估计会波动；采样越多，越接近真实值。“无法枚举”和“估计会波动”这两件事，分别是 5.3 节和第 6 节要处理的问题。</p>
 
 <p>严格说，还应该对 prompt 取期望，因为训练时有很多不同的 bug 要修：</p>
 
@@ -515,27 +590,48 @@ $$J(\theta) = \mathbb{E}_{x \sim \mathcal{D}}\; \mathbb{E}_{\tau \sim \pi_\theta
 
 <h3><span class="num">5.1</span>梯度传不过去</h3>
 
-<p>想最大化 \(J(\theta)\)，最直接的办法是求 \(\nabla_\theta J\)，然后做梯度上升。但马上会撞上一堵墙。</p>
+<p>想最大化 \(J(\theta)\)，最直接的办法是求 \(\nabla_\theta J\)，然后做梯度上升。\(\nabla_\theta J\) 问的是：<strong>把参数微调一点点，通过率会变多少？</strong></p>
 
-<p>从参数 \(\theta\) 到奖励 \(R\)，计算路径是：参数 → logit → softmax 概率 → <strong>采样</strong>出 token → 拼成代码 → <strong>跑测试</strong> → 奖励。</p>
+<p>在 SFT 里，类似的问题很好回答。从参数到 loss 的路径是：参数 → \(h\) → logit → softmax 概率 → \(-\log p_k\)。每一步都是连续的公式：参数动一点，logit 就动一点，概率和 loss 也跟着动一点。每一步都能写出局部导数，链式法则把它们连乘起来，就是反向传播。</p>
 
-<p>这条路径断了两次。采样是离散的：概率从 0.29 变成 0.30，抽出来的 token 要么还是同一个，要么突然换了一个，没有连续的变化可言。跑测试是一个外部程序，不是可微的计算图，梯度根本进不去。</p>
+<p>RL 的路径更长：参数 → logit → softmax 概率 → <strong>采样</strong>出 token → 拼成代码 → <strong>跑测试</strong> → 奖励。前三步和 SFT 一样，问题出在加粗的两步。</p>
 
-<p>所以不能像 SFT 那样，把 \(R\) 当作 loss 直接反向传播。需要换一个思路。</p>
+<p><strong>第一处断点：采样。</strong>假设 <code>if</code> 的概率是 0.29。采样可以想象成：从 0 到 1 之间随机抽一个数 \(r\)，如果 \(r &lt; 0.29\) 就选 <code>if</code>。现在把 <code>if</code> 的概率调到 0.30，看同一个随机数下，这一次的输出会怎样：</p>
+
+<table>
+  <thead><tr><th>随机数 \(r\)</th><th>概率 0.29 时</th><th>概率 0.30 时</th></tr></thead>
+  <tbody>
+    <tr><td>0.10</td><td><code>if</code></td><td><code>if</code></td></tr>
+    <tr><td>0.295</td><td>不是 <code>if</code></td><td><code>if</code></td></tr>
+    <tr><td>0.80</td><td>不是 <code>if</code></td><td>不是 <code>if</code></td></tr>
+  </tbody>
+</table>
+
+<p>绝大多数情况下，输出完全不变，导数是 0；极少数情况下，输出突然从一个 token 跳到另一个，中间没有过渡，导数不存在。“这一次抽出了哪个 token”对概率来说是一个台阶，而不是一条平滑的曲线。导数要么是 0，要么不存在，都无法告诉我们参数该往哪边调。</p>
+
+<p>SFT 没有这个问题，因为它不采样。它直接看标准答案的概率 \(p_k\)：概率从 0.29 变到 0.30，loss 就从 \(-\log 0.29\) 平滑地变到 \(-\log 0.30\)。</p>
+
+<p><strong>第二处断点：跑测试。</strong>即使绕开采样，后面还有测试。测试是一个 Python 解释器加上 <code>assert mean([]) == 0</code> 这样的检查，它不是计算图里的节点，没有“输入变化 0.01，输出变化多少”的公式。更根本的是，它的输入是代码，而代码是离散的：没有一段代码“介于 <code>if not xs</code> 和 <code>if xs is None</code> 之间”。它的输出也是离散的，只有 0 和 1。</p>
+
+<p>所以不能像 SFT 那样，把 \(R\) 当作 loss 直接反向传播。写成代码，<code>(-R).backward()</code> 什么也做不了：\(R\) 只是测试程序返回的一个数，在计算图里和参数没有任何连接。</p>
+
+<p><strong>出路：平均值是平滑的。</strong>单次采样的结果会跳变，但平均结果不会。回到 4.3 节的表：把 <code>if not xs: return 0</code> 的概率从 0.20 提高到 0.21，同时从某段失败代码那里挪走 0.01，通过率 \(J\) 就从 0.30 平滑地变成 0.31。这就像投篮：某一次投篮只有进或不进，不会连续变化；但动作一点点改进，命中率可以从 30% 平滑地涨到 31%。</p>
+
+<p>所以思路是：<strong>不对“抽到了什么、测试结果是什么”求导，而是对“写出各段代码的概率”求导，再用奖励给这些概率加权。</strong>奖励不负责传递梯度，只负责说明哪些代码的概率该提高、哪些该降低；梯度只沿着概率那一段回传，而那一段和 SFT 一样可微。下一节把这个思路写成公式。</p>
 
 <h3><span class="num">5.2</span>换一个角度写期望</h3>
 
-<p>把期望写成求和的形式。对所有可能的轨迹 \(\tau\)，用它的概率加权它的奖励：</p>
+<p>从 4.3 节的求和形式出发：</p>
 
 $$J(\theta) = \sum_\tau \pi_\theta(\tau)\, R(\tau)$$
 
-<p>这个式子里有一件很关键的事：<strong>\(R(\tau)\) 和 \(\theta\) 无关。</strong>测试结果只取决于写出了什么代码。同一段代码，不管是哪个模型写的，测试结果都一样。参数 \(\theta\) 唯一能影响的，是每段代码被写出来的<strong>概率</strong> \(\pi_\theta(\tau)\)。</p>
+<p>4.3 节已经指出：<strong>\(R(\tau)\) 和 \(\theta\) 无关</strong>，参数 \(\theta\) 唯一能影响的，是每段代码被写出来的<strong>概率</strong> \(\pi_\theta(\tau)\)。</p>
 
 <p>所以求梯度时，\(R\) 可以当成常数，梯度只作用在概率上：</p>
 
 $$\nabla_\theta J = \sum_\tau R(\tau)\, \nabla_\theta \pi_\theta(\tau)$$
 
-<p>这一步已经绕开了那堵墙。我们不再需要对测试程序求导，只需要对“写出某段代码的概率”求导，而这个概率是模型直接算出来的，完全可微。</p>
+<p>这就是上一节的思路落到公式上：两处断点都被绕开了。我们不再需要对采样结果或测试程序求导，只需要对“写出某段代码的概率”求导，而这个概率是模型直接算出来的，完全可微。</p>
 
 <p>这个式子的含义也很直观：<strong>要提高平均分，就把高分轨迹的概率推高。</strong>每段代码的概率梯度，用它的奖励加权。奖励是 0 的代码，对梯度没有贡献；奖励是 1 的代码，它的概率会被推高。</p>
 
