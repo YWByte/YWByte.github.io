@@ -680,6 +680,16 @@ $$\nabla_\theta J = \mathbb{E}_{\tau \sim \pi_\theta}\Big[\, R(\tau) \sum_{t=1}^
 
 $$\mathcal{L}_{\text{RL}} = -\,R \cdot \sum_{t=1}^{T} \log \pi_\theta(a_t \mid s_t)$$
 
+<p>这个 loss 什么时候算、什么时候更新，需要说清楚。一次 REINFORCE 更新分三个阶段，顺序是固定的：</p>
+
+<ol>
+  <li><strong>生成：只采样，不更新。</strong>模型按当前的概率一个 token 一个 token 地写，直到写完整段代码。每个位置选了哪个 token、当时的概率是多少，都记录下来。这个过程中参数始终不变。</li>
+  <li><strong>打分：</strong>把写完的代码拿去跑测试，得到 \(R\)。</li>
+  <li><strong>更新：一次性处理整条路径。</strong>把每个位置记录下的 \(\log \pi_\theta(a_t \mid s_t)\) 加起来，乘以 \(R\) 得到 loss，做一次反向传播和一次参数更新。所有位置的梯度在这一次反向传播里同时算出来。</li>
+</ol>
+
+<p>所以模型不会“写一个 token 就改一次”。写到第 1 个位置时，模型还不知道这段代码最终能否通过，自然也不知道该推高还是压低这个选择。只有拿到 \(R\) 之后，回头看整条路径，才能决定每个位置该怎么调。这之所以可行，是因为第 1 个位置的梯度只取决于两件事：当时选了哪个 token，以及最终的 \(R\)。前者在生成时已经记下，后者打分后才知道。</p>
+
 <p>这就是 <strong>REINFORCE</strong> 算法，Williams 在 1992 年提出。现在把它和 SFT 的 loss 并排放在一起：</p>
 
 $$\mathcal{L}_{\text{SFT}} = -\sum_{t=1}^{T} \log \pi_\theta(y_t \mid x, y_{&lt;t})$$
@@ -701,7 +711,7 @@ $$\mathcal{L}_{\text{SFT}} = -\sum_{t=1}^{T} \log \pi_\theta(y_t \mid x, y_{&lt;
 
 $$\Delta z_i \;\propto\; R \cdot \big(\mathbb{1}[i = a_t] - p_i\big)$$
 
-<p>其中 \(a_t\) 是模型在这个位置实际选的 token。和 SFT 的唯一区别是：<strong>被推高的不是标准答案，而是模型刚才自己选的那个 token</strong>，推的力度再乘以 \(R\)。</p>
+<p>其中 \(a_t\) 是模型在这个位置实际选的 token。这个更新发生在整段代码写完、拿到 \(R\) 之后，对轨迹里的每个位置同时进行。和 SFT 的唯一区别是：<strong>被推高的不是标准答案，而是模型刚才自己选的那个 token</strong>，推的力度再乘以 \(R\)。</p>
 
 <ul>
   <li>如果 \(R = 1\)：沿途每个位置上，模型选过的 token 都被推高，就像把这段代码当成标准答案做了一次 SFT。</li>
@@ -814,16 +824,18 @@ $$\frac{\partial J}{\partial z_k} = p_k \,(R_k - J)$$
 
 <h3><span class="num">7.1</span>一次更新的细节</h3>
 
-<p>以采到 <code>return sum(xs) / len(xs) if xs else 0</code> 为例，它通过了测试，\(R = 1\)。这条路径上有两个决策点：</p>
+<p>以采到 <code>return sum(xs) / len(xs) if xs else 0</code> 为例。模型先在位置 1 抽到 <code>return</code>（概率 0.55），再在位置 2 抽到 “<code>… if xs else 0</code>” 这个分支（概率 0.25），整段代码写完后跑测试，通过了，\(R = 1\)。这时才开始更新。</p>
+
+<p>这条路径上有两个决策点。下面两条描述的是<strong>同一次更新</strong>里两个位置各自的变化，它们同时发生，没有先后之分：</p>
 
 <ul>
-  <li>第一步选了 <code>return</code>。按 5.6 节的公式，<code>return</code> 的 logit 增加 \(0.5 \times (1 - 0.55) = 0.225\)，<code>if</code> 和 <code>try</code> 分别减少 \(0.5 \times 0.30\) 和 \(0.5 \times 0.15\)。更新后，第一步的分布从 \((0.30, 0.55, 0.15)\) 变成约 \((0.24, 0.63, 0.13)\)。</li>
-  <li>第二步选了 “<code>… if xs else 0</code>” 这个分支。它的概率从 0.25 变成约 0.41。</li>
+  <li>位置 1 选的是 <code>return</code>。按 5.6 节的公式，<code>return</code> 的 logit 增加 \(0.5 \times (1 - 0.55) = 0.225\)，<code>if</code> 和 <code>try</code> 分别减少 \(0.5 \times 0.30\) 和 \(0.5 \times 0.15\)。更新后，位置 1 的分布从 \((0.30, 0.55, 0.15)\) 变成约 \((0.24, 0.63, 0.13)\)。</li>
+  <li>位置 2 选的是 “<code>… if xs else 0</code>” 这个分支。它的概率从 0.25 变成约 0.41。</li>
 </ul>
 
 <p>整条路径的概率从 \(0.55 \times 0.25 \approx 0.14\) 升到约 \(0.63 \times 0.41 \approx 0.26\)，几乎翻倍。通过率从 41% 升到约 49%。</p>
 
-<p>注意一个副作用：第一步的 <code>return</code> 被推高了，但 <code>return</code> 下面还有一个错误的分支 <code>return sum(xs) / len(xs)</code>。它的路径概率是 \(0.63 \times 0.59 \approx 0.37\)，比更新前的 \(0.55 \times 0.75 \approx 0.41\) 低了一些，但它的“入口”变宽了。一个好结果把沿途所有选择都推高，而其中的某些选择也通往坏结果。这就是 5.6 节说的功劳分配问题，在这个小例子里已经能看到。</p>
+<p>注意一个副作用：位置 1 的 <code>return</code> 被推高了，但 <code>return</code> 下面还有一个错误的分支 <code>return sum(xs) / len(xs)</code>。它的路径概率是 \(0.63 \times 0.59 \approx 0.37\)，比更新前的 \(0.55 \times 0.75 \approx 0.41\) 低了一些，但它的“入口”变宽了。一个好结果把沿途所有选择都推高，而其中的某些选择也通往坏结果。这就是 5.6 节说的功劳分配问题，在这个小例子里已经能看到。</p>
 
 <h3><span class="num">7.2</span>连续训练</h3>
 
