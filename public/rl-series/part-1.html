@@ -397,15 +397,17 @@ $$-\frac{\partial \mathcal{L}}{\partial z_i} = \begin{cases} 1 - p_k & i = k \te
 <p><strong>代入例子。</strong>光标处的概率是 \(p = (0.29, 0.52, 0.11, 0.05, 0.03)\)，目标 token 是 <code>if</code>：</p>
 
 <table>
-  <thead><tr><th>token</th><th>当前概率 \(p_i\)</th><th>更新方向 \(\mathbb{1}[i=k] - p_i\)</th><th>含义</th></tr></thead>
+  <thead><tr><th>token</th><th>当前概率 \(p_i\)</th><th>logit 的负梯度 \(\mathbb{1}[i=k] - p_i\)</th><th>对 logit 的含义</th></tr></thead>
   <tbody>
-    <tr><td><code>if</code></td><td>0.29</td><td class="c-up">\(1 - 0.29 = +0.71\)</td><td>往上推</td></tr>
+    <tr><td><code>if</code></td><td>0.29</td><td class="c-up">\(1 - 0.29 = +0.71\)</td><td>logit 往上推</td></tr>
     <tr><td><code>return</code></td><td>0.52</td><td class="c-down">\(-0.52\)</td><td>被压得最多</td></tr>
     <tr><td><code>try</code></td><td>0.11</td><td class="c-down">\(-0.11\)</td><td>被轻轻压一下</td></tr>
     <tr><td><code>pass</code></td><td>0.05</td><td class="c-down">\(-0.05\)</td><td>几乎不动</td></tr>
     <tr><td><code>#</code></td><td>0.03</td><td class="c-down">\(-0.03\)</td><td>几乎不动</td></tr>
   </tbody>
 </table>
+
+<p>注意第三列的单位：它是 <strong>logit</strong> 该被推多少，不是概率会变多少。+0.71 的意思是：<code>if</code> 的 logit 每增加一点点 \(\varepsilon\)，loss 大约下降 \(0.71\varepsilon\)。学习率为 1 时，<code>if</code> 的 logit 会加 0.71，但概率只从 0.29 升到 0.55，因为 logit 还要经过 softmax 才变成概率。2.4 节的图 2 可以亲手点一步看看。</p>
 
 <p>这个结果会在本篇反复出现，值得逐条读懂。</p>
 
@@ -471,7 +473,7 @@ $$\mathcal{L} \;\to\; z \;\to\; \begin{cases} W & \text{参数，梯度停在这
 
 <h3><span class="num">2.4</span>一步更新</h3>
 
-<p>下面的图回到 2.2 节的 5 个 token，并做一个简化：把每个 logit 当作可以直接修改的参数，更新量就是 \(-\eta(p - y)\)。这样能直接看到 2.2 节的梯度怎样改变概率，省去 \(W\) 和 \(h\) 那一层。点“训练一步”，看一次梯度更新带来的变化。右侧数字是这一步造成的概率变化。也可以点其他行，把它设为目标 token：</p>
+<p>下面的图回到 2.2 节的 5 个 token，并做一个简化：把每个 logit 当作可以直接修改的参数，更新量就是 \(-\eta(p - y)\)。这样能直接看到 2.2 节的梯度怎样改变概率，省去 \(W\) 和 \(h\) 那一层。点“训练一步”，看一次梯度更新带来的变化。右侧数字是这一步造成的<strong>概率</strong>变化，不是 logit 的变化。以 <code>if</code> 为例：这一步它的 logit 加了 0.71（1.20 → 1.91），重新做 softmax 后，概率加了 0.26（0.29 → 0.55）。也可以点其他行，把它设为目标 token：</p>
 
 <figure class="viz" id="viz-sft">
   <div class="viz-box">
