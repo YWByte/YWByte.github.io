@@ -302,19 +302,27 @@ $$\log \pi_\theta(y \mid x) = \sum_{t=1}^{T} \log \pi_\theta(y_t \mid x, y_{&lt;
 
 <h3><span class="num">2.1</span>交叉熵 loss</h3>
 
-<p>先看最熟悉的情况：我们有一份标准答案。比如人类工程师写的修复是 <code>if not xs: return 0</code>，那么光标处的标准答案就是 <code>if</code>。</p>
+<p>先看最熟悉的情况：我们有一份标准答案。比如人类工程师写的修复是 <code>if not xs: return 0</code>，这一整段代码就是<strong>标准答案</strong>。把它切成 token 后，每个位置都对应一个正确的 token，本文把它叫作这个位置的<strong>目标 token</strong>。光标处的目标 token 是 <code>if</code>，下一个位置的目标 token 是 <code>not</code>，依此类推。</p>
 
-<p>监督微调（SFT）希望标准答案的概率尽可能大。直接最大化概率不方便，通常最小化它的负对数，也就是交叉熵：</p>
+<p>记住这个区分：<strong>标准答案指整段输出，目标 token 指某一个位置上的那一个 token。</strong>前者的概率是一串条件概率的乘积，后者的概率只是某个位置 softmax 分布里的一格。</p>
+
+<p>监督微调（SFT）希望整段标准答案的概率尽可能大。由 1.3 节，它等于每个位置上目标 token 概率的乘积；由 1.4 节，取负对数之后变成每个位置的项相加：</p>
+
+$$-\log \pi_\theta(y \mid x) = \sum_{t=1}^{T} \underbrace{-\log \pi_\theta(y_t \mid x, y_{&lt;t})}_{\text{第 } t \text{ 个位置的 loss}}$$
+
+<p>整段 loss 只是各个位置的 loss 相加，所以可以先只研究<strong>一个位置</strong>，弄懂之后再加起来（2.4 节做这件事）。下面固定在光标处：前文是 <code>def mean(xs):</code>，目标 token 是 <code>if</code>。这一个位置的 loss 是交叉熵：</p>
 
 $$\mathcal{L} = -\log p_{\text{target}}$$
 
-<p>这个 loss 有一个直观的读法：标准答案的概率越低，loss 越大，而且是急剧变大。概率 0.9 时 loss 约 0.11；概率 0.29 时约 1.24；概率趋近 0 时 loss 趋近无穷。模型越是“自信地错”，受到的惩罚越重。</p>
+<p>这里的 \(p_{\text{target}}\) 是<strong>这一个位置</strong>的 softmax 分给目标 token <code>if</code> 的概率，也就是光标处概率分布里 <code>if</code> 那一格（0.29），不是整段标准答案的概率。本节和 2.3 节的 \(\mathcal{L}\)、\(p_k\) 都是这个单位置的量。</p>
+
+<p>这个 loss 有一个直观的读法：目标 token 的概率越低，loss 越大，而且是急剧变大。概率 0.9 时 loss 约 0.11；概率 0.29 时约 1.24；概率趋近 0 时 loss 趋近无穷。模型越是“自信地错”，受到的惩罚越重。</p>
 
 <h3><span class="num">2.2</span>梯度长什么样</h3>
 
 <p>训练要回答的问题是：<strong>每个 token 的 logit 应该往上调还是往下调，各调多少？</strong>这正是 loss 对每个 logit 的导数 \(\partial \mathcal{L} / \partial z_i\) 给出的信息。算出它之后，反向传播才能把信号继续传给 \(h\)、\(W\) 和 Transformer 内部的参数。下面一步一步把它算出来。</p>
 
-<p><strong>第一步：把 loss 写成 logit 的函数。</strong>记标准答案的下标为 \(k\)，在我们的例子里 \(k\) 就是 <code>if</code>。softmax 给出 \(p_k = e^{z_k} / \sum_j e^{z_j}\)，代入 loss：</p>
+<p><strong>第一步：把 loss 写成 logit 的函数。</strong>仍然只看光标这一个位置，\(z_i\) 是这个位置的 logit，目标 token 的下标为 \(k\)（即 <code>if</code>）。softmax 给出 \(p_k = e^{z_k} / \sum_j e^{z_j}\)，代入 loss：</p>
 
 $$\mathcal{L} = -\log \frac{e^{z_k}}{\sum_j e^{z_j}}$$
 
@@ -322,11 +330,11 @@ $$\mathcal{L} = -\log \frac{e^{z_k}}{\sum_j e^{z_j}}$$
 
 $$\mathcal{L} = -z_k + \log \sum_j e^{z_j}$$
 
-<p>拆开以后，两项各有清楚的含义。第一项 \(-z_k\) 只和标准答案有关：标准答案的 logit 越大，loss 越小。第二项 \(\log \sum_j e^{z_j}\) 和所有 token 都有关：所有 token 的整体分数越高，loss 越大，其中分数高的 token 贡献最大，因为指数会放大它们。所以 loss 本身已经说明了训练要做什么：<strong>抬高标准答案，压低其他竞争者。</strong></p>
+<p>拆开以后，两项各有清楚的含义。第一项 \(-z_k\) 只和目标 token 有关：目标 token 的 logit 越大，loss 越小。第二项 \(\log \sum_j e^{z_j}\) 和所有 token 都有关：所有 token 的整体分数越高，loss 越大，其中分数高的 token 贡献最大，因为指数会放大它们。所以 loss 本身已经说明了训练要做什么：<strong>抬高目标 token，压低其他竞争者。</strong></p>
 
 <p><strong>第二步：分别对两项求导。</strong>我们要求 loss 对任意一个 logit \(z_i\) 的导数，\(i\) 可以是 <code>if</code>、<code>return</code>、<code>try</code> 中的任何一个。</p>
 
-<p>第一项 \(-z_k\) 里只有标准答案的 logit。如果 \(i = k\)，正在看的就是 <code>if</code> 本身，导数是 \(-1\)；如果 \(i \neq k\)，比如正在看 <code>return</code>，那么 \(-z_k\) 里根本没有 \(z_{\texttt{return}}\)，导数是 0。</p>
+<p>第一项 \(-z_k\) 里只有目标 token 的 logit。如果 \(i = k\)，正在看的就是 <code>if</code> 本身，导数是 \(-1\)；如果 \(i \neq k\)，比如正在看 <code>return</code>，那么 \(-z_k\) 里根本没有 \(z_{\texttt{return}}\)，导数是 0。</p>
 
 <p>第二项先把分母记作 \(S = \sum_j e^{z_j}\)，它就是 \(\log S\)。由链式法则：</p>
 
@@ -344,7 +352,7 @@ $$\frac{\partial \mathcal{L}}{\partial z_i} = p_i - \mathbb{1}[i = k]$$
 
 <p>\(\mathbb{1}[i = k]\) 叫做指示函数：括号里的条件成立时等于 1，不成立时等于 0。所以这个式子对 <code>if</code> 是 \(p_{\texttt{if}} - 1\)，对其他 token 就是它们自己的概率 \(p_i\)。</p>
 
-<p>还有一种更整齐的写法。把标准答案写成一个 one-hot 的目标分布 \(y = (1, 0, 0, 0, 0)\)，那么所有分量合在一起就是：</p>
+<p>还有一种更整齐的写法。把目标 token 写成一个 one-hot 的目标分布 \(y = (1, 0, 0, 0, 0)\)，那么所有分量合在一起就是：</p>
 
 $$\frac{\partial \mathcal{L}}{\partial z} = p - y$$
 
@@ -352,9 +360,9 @@ $$\frac{\partial \mathcal{L}}{\partial z} = p - y$$
 
 <p><strong>第四步：取负号得到更新方向。</strong>梯度指向 loss 增大的方向，梯度下降要往反方向走，所以 logit 的变化方向是：</p>
 
-$$-\frac{\partial \mathcal{L}}{\partial z_i} = \begin{cases} 1 - p_k & i = k \text{（标准答案）} \\ -p_i & i \neq k \text{（其他 token）} \end{cases}$$
+$$-\frac{\partial \mathcal{L}}{\partial z_i} = \begin{cases} 1 - p_k & i = k \text{（目标 token）} \\ -p_i & i \neq k \text{（其他 token）} \end{cases}$$
 
-<p><strong>代入例子。</strong>光标处的概率是 \(p = (0.29, 0.52, 0.11, 0.05, 0.03)\)，标准答案是 <code>if</code>：</p>
+<p><strong>代入例子。</strong>光标处的概率是 \(p = (0.29, 0.52, 0.11, 0.05, 0.03)\)，目标 token 是 <code>if</code>：</p>
 
 <table>
   <thead><tr><th>token</th><th>当前概率 \(p_i\)</th><th>更新方向 \(\mathbb{1}[i=k] - p_i\)</th><th>含义</th></tr></thead>
@@ -369,15 +377,15 @@ $$-\frac{\partial \mathcal{L}}{\partial z_i} = \begin{cases} 1 - p_k & i = k \te
 
 <p>这个结果会在本篇反复出现，值得逐条读懂。</p>
 
-<p><strong>标准答案被往上推，力度是 \(1 - p_k\)。</strong>\(1 - p_k\) 是标准答案离“概率等于 1”还差多少。<code>if</code> 现在是 0.29，还差 0.71，所以被大幅往上推；如果它已经是 0.99，只差 0.01，就几乎不再变化。模型已经学会的东西，梯度会自动变小，不需要人为干预。</p>
+<p><strong>目标 token 被往上推，力度是 \(1 - p_k\)。</strong>\(1 - p_k\) 是目标 token 离“概率等于 1”还差多少。<code>if</code> 现在是 0.29，还差 0.71，所以被大幅往上推；如果它已经是 0.99，只差 0.01，就几乎不再变化。模型已经学会的东西，梯度会自动变小，不需要人为干预。</p>
 
-<p><strong>其他 token 被往下压，力度是它们当前的概率 \(p_i\)。</strong><code>return</code> 的概率是 0.52，它是 <code>if</code> 最主要的竞争者，所以被压得最多。<code>#</code> 只有 0.03，本来就很少被选中，压它也没什么意义，所以几乎不受影响。换句话说：<strong>谁从标准答案那里抢走的概率越多，谁就被压得越狠。</strong></p>
+<p><strong>其他 token 被往下压，力度是它们当前的概率 \(p_i\)。</strong><code>return</code> 的概率是 0.52，它是 <code>if</code> 最主要的竞争者，所以被压得最多。<code>#</code> 只有 0.03，本来就很少被选中，压它也没什么意义，所以几乎不受影响。换句话说：<strong>谁从目标 token 那里抢走的概率越多，谁就被压得越狠。</strong></p>
 
-<p><strong>所有分量加起来是 0。</strong>标准答案增加 0.71，其他 token 一共减少 \(0.52 + 0.11 + 0.05 + 0.03 = 0.71\)，正好抵消。一般地，\((1 - p_k) - \sum_{i \neq k} p_i = 1 - \sum_i p_i = 0\)。原因是概率总和固定为 1，像一块大小不变的饼，训练只会把错误 token 手里的那份挪给标准答案。这和 1.1 节说的“只有 logit 之间的差值有意义”是同一件事：所有 logit 一起加上同一个数，概率完全不变，对降低 loss 毫无帮助，所以梯度里也不会包含这个方向。</p>
+<p><strong>所有分量加起来是 0。</strong>目标 token 增加 0.71，其他 token 一共减少 \(0.52 + 0.11 + 0.05 + 0.03 = 0.71\)，正好抵消。一般地，\((1 - p_k) - \sum_{i \neq k} p_i = 1 - \sum_i p_i = 0\)。原因是概率总和固定为 1，像一块大小不变的饼，训练只会把错误 token 手里的那份挪给目标 token。这和 1.1 节说的“只有 logit 之间的差值有意义”是同一件事：所有 logit 一起加上同一个数，概率完全不变，对降低 loss 毫无帮助，所以梯度里也不会包含这个方向。</p>
 
 <h3><span class="num">2.3</span>一步更新</h3>
 
-<p>点“训练一步”，看一次梯度更新带来的变化。右侧数字是这一步造成的概率变化。也可以点其他行，把它设为标准答案：</p>
+<p>点“训练一步”，看一次梯度更新带来的变化。右侧数字是这一步造成的概率变化。也可以点其他行，把它设为目标 token：</p>
 
 <figure class="viz" id="viz-sft">
   <div class="viz-box">
@@ -388,7 +396,7 @@ $$-\frac{\partial \mathcal{L}}{\partial z_i} = \begin{cases} 1 - p_k & i = k \te
       <span class="readout loss-readout"></span>
     </div>
   </div>
-  <figcaption>图 2　SFT 的一步：推高标准答案，按概率比例压低其他 token（学习率为 1，直接作用在 logit 上）</figcaption>
+  <figcaption>图 2　SFT 的一步：推高目标 token，按概率比例压低其他 token（学习率为 1，直接作用在 logit 上）</figcaption>
 </figure>
 
 <p>第一步之后，<code>if</code> 从 0.29 升到 0.55，<code>return</code> 从 0.52 降到 0.29，被压得最多，因为它原本是最大的竞争者。<code>#</code> 几乎不变，因为它本来就只有 0.03。</p>
@@ -402,7 +410,7 @@ $$-\frac{\partial \mathcal{L}}{\partial z_i} = \begin{cases} 1 - p_k & i = k \te
 
 <h3><span class="num">2.4</span>整段答案</h3>
 
-<p>真实的标准答案是一整段代码。SFT 对其中每个位置都做一次 2.3 节的推动，loss 是每个位置的交叉熵之和：</p>
+<p>回到整段标准答案。SFT 对其中每个位置都做一次 2.3 节的推动，推高该位置的目标 token，loss 是每个位置的交叉熵之和：</p>
 
 $$\mathcal{L}_{\text{SFT}} = -\sum_{t=1}^{T} \log \pi_\theta(y_t \mid x, y_{&lt;t})$$
 
@@ -419,7 +427,7 @@ $$\mathcal{L}_{\text{SFT}} = -\sum_{t=1}^{T} \log \pi_\theta(y_t \mid x, y_{&lt;
 <!-- ============================================================ -->
 <h2 id="s3"><span class="num">3</span>监督微调的局限</h2>
 
-<p>SFT 简单、稳定、高效，大模型的后训练几乎都从它开始。但它对数据有一个很强的要求：<strong>每个位置都要有标准答案</strong>。这个要求带来几个绕不开的问题。</p>
+<p>SFT 简单、稳定、高效，大模型的后训练几乎都从它开始。但它对数据有一个很强的要求：<strong>每个位置都要有目标 token</strong>，也就是必须有一份完整的标准答案。这个要求带来几个绕不开的问题。</p>
 
 <h3><span class="num">3.1</span>正确答案不止一个</h3>
 
@@ -430,7 +438,7 @@ return sum(xs) / len(xs) if xs else 0
 try: return sum(xs) / len(xs)
 except ZeroDivisionError: return 0</code></pre>
 
-<p>SFT 只能选其中一种当标准答案。如果选了第一种，那么在光标处，标准答案是 <code>if</code>。按 2.2 节的梯度，<code>return</code> 和 <code>try</code> 都会被往下压，即便它们引出的代码同样正确。</p>
+<p>SFT 只能选其中一种当标准答案。如果选了第一种，那么在光标处，目标 token 是 <code>if</code>。按 2.2 节的梯度，<code>return</code> 和 <code>try</code> 都会被往下压，即便它们引出的代码同样正确。</p>
 
 <p>模型因此学到的不是“怎样修好这个 bug”，而是“怎样写得像这份答案”。如果数据集里不同样本用了不同写法，模型就会在这些写法之间摇摆，并为此付出 loss。</p>
 
@@ -609,7 +617,7 @@ $$J(\theta) = \mathbb{E}_{x \sim \mathcal{D}}\; \mathbb{E}_{\tau \sim \pi_\theta
 
 <p>绝大多数情况下，输出完全不变，导数是 0；极少数情况下，输出突然从一个 token 跳到另一个，中间没有过渡，导数不存在。“这一次抽出了哪个 token”对概率来说是一个台阶，而不是一条平滑的曲线。导数要么是 0，要么不存在，都无法告诉我们参数该往哪边调。</p>
 
-<p>SFT 没有这个问题，因为它不采样。它直接看标准答案的概率 \(p_k\)：概率从 0.29 变到 0.30，loss 就从 \(-\log 0.29\) 平滑地变到 \(-\log 0.30\)。</p>
+<p>SFT 没有这个问题，因为它不采样。它直接看目标 token 的概率 \(p_k\)：概率从 0.29 变到 0.30，loss 就从 \(-\log 0.29\) 平滑地变到 \(-\log 0.30\)。</p>
 
 <p><strong>第二处断点：跑测试。</strong>即使绕开采样，后面还有测试。测试是一个 Python 解释器加上 <code>assert mean([]) == 0</code> 这样的检查，它不是计算图里的节点，没有“输入变化 0.01，输出变化多少”的公式。更根本的是，它的输入是代码，而代码是离散的：没有一段代码“介于 <code>if not xs</code> 和 <code>if xs is None</code> 之间”。它的输出也是离散的，只有 0 和 1。</p>
 
@@ -697,7 +705,7 @@ $$\mathcal{L}_{\text{SFT}} = -\sum_{t=1}^{T} \log \pi_\theta(y_t \mid x, y_{&lt;
 <p>它们只有两处不同：</p>
 
 <ol>
-  <li>SFT 里的 token \(y_t\) 来自<strong>标准答案</strong>；RL 里的 token \(a_t\) 来自<strong>模型自己的采样</strong>。</li>
+  <li>SFT 里的 token \(y_t\) 是<strong>标准答案</strong>在第 \(t\) 个位置的目标 token；RL 里的 token \(a_t\) 来自<strong>模型自己的采样</strong>。</li>
   <li>RL 多了一个权重 <span class="c-reward">\(R\)</span>。</li>
 </ol>
 
@@ -711,7 +719,7 @@ $$\mathcal{L}_{\text{SFT}} = -\sum_{t=1}^{T} \log \pi_\theta(y_t \mid x, y_{&lt;
 
 $$\Delta z_i \;\propto\; R \cdot \big(\mathbb{1}[i = a_t] - p_i\big)$$
 
-<p>其中 \(a_t\) 是模型在这个位置实际选的 token。这个更新发生在整段代码写完、拿到 \(R\) 之后，对轨迹里的每个位置同时进行。和 SFT 的唯一区别是：<strong>被推高的不是标准答案，而是模型刚才自己选的那个 token</strong>，推的力度再乘以 \(R\)。</p>
+<p>其中 \(a_t\) 是模型在这个位置实际选的 token。这个更新发生在整段代码写完、拿到 \(R\) 之后，对轨迹里的每个位置同时进行。和 SFT 的唯一区别是：<strong>被推高的不是标准答案里的目标 token，而是模型刚才自己选的那个 token</strong>，推的力度再乘以 \(R\)。</p>
 
 <ul>
   <li>如果 \(R = 1\)：沿途每个位置上，模型选过的 token 都被推高，就像把这段代码当成标准答案做了一次 SFT。</li>
@@ -957,7 +965,7 @@ $$\text{pass@}k = 1 - (1 - p)^k$$
 
 <ul>
   <li>语言模型在每个位置输出一个概率分布。一段输出的概率是每个位置概率的乘积，取对数后变成求和。</li>
-  <li>SFT 最小化标准答案的负对数概率。对 logit 的梯度是 \(\mathbb{1}[i = k] - p_i\)：推高标准答案，按概率比例压低其他 token。</li>
+  <li>SFT 最小化整段标准答案的负对数概率，也就是每个位置目标 token 的负对数概率之和。单个位置对 logit 的梯度是 \(\mathbb{1}[i = k] - p_i\)：推高目标 token，按概率比例压低其他 token。</li>
   <li>SFT 需要唯一的标准答案，上限是示范者，而且只在“前面都对”的状态下训练，导致误差在长序列上累积。</li>
   <li>强化学习的目标是最大化期望奖励 \(J(\theta) = \mathbb{E}[R]\)。奖励来自外部，不可导。</li>
   <li>策略梯度定理把梯度写成 \(\mathbb{E}[R \cdot \nabla \log \pi]\)：奖励只是权重，梯度来自模型自己的对数概率。环境的转移概率与参数无关，在梯度中消失。</li>
@@ -975,7 +983,7 @@ $$\text{pass@}k = 1 - (1 - p)^k$$
 </div>
 
 <div class="ex">
-<span class="ex-title">练习 2</span>　某位置的概率是 \(p = (0.5, 0.3, 0.2)\)，标准答案是第二个 token。写出交叉熵 loss 对 3 个 logit 的负梯度，并验证它们的和为 0。为什么和一定是 0？
+<span class="ex-title">练习 2</span>　某位置的概率是 \(p = (0.5, 0.3, 0.2)\)，目标 token 是第二个 token。写出交叉熵 loss 对 3 个 logit 的负梯度，并验证它们的和为 0。为什么和一定是 0？
 <details><summary>参考答案</summary><div>
 <p>负梯度是 \((-0.5,\; 0.7,\; -0.2)\)，和为 0。因为 softmax 对“所有 logit 加同一个常数”不敏感，loss 在这个方向上没有变化，所以梯度在这个方向上的分量（也就是所有分量之和）必须是 0。</p>
 </div></details>
