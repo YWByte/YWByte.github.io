@@ -320,9 +320,39 @@ $$\mathcal{L} = -\log p_{\text{target}}$$
 
 <h3><span class="num">2.2</span>梯度长什么样</h3>
 
-<p>训练要回答的问题是：<strong>每个 token 的 logit 应该往上调还是往下调，各调多少？</strong>这正是 loss 对每个 logit 的导数 \(\partial \mathcal{L} / \partial z_i\) 给出的信息。算出它之后，反向传播才能把信号继续传给 \(h\)、\(W\) 和 Transformer 内部的参数。下面一步一步把它算出来。</p>
+<p>2.1 节给出了目标：让 \(\mathcal{L}\) 变小。但目标本身不告诉我们该怎么做。我们手里能动的是什么？在这一个位置上，loss 由 5 个 logit 决定：\(z_{\texttt{if}}, z_{\texttt{return}}, z_{\texttt{try}}, z_{\texttt{pass}}, z_{\texttt{\#}}\)。可以把它们想象成 5 个旋钮，每个旋钮都可以往上拧或往下拧。问题变成：<strong>每个旋钮该往哪个方向拧，拧多少？</strong></p>
 
-<p><strong>第一步：把 loss 写成 logit 的函数。</strong>仍然只看光标这一个位置，\(z_i\) 是这个位置的 logit，目标 token 的下标为 \(k\)（即 <code>if</code>）。softmax 给出 \(p_k = e^{z_k} / \sum_j e^{z_j}\)，代入 loss：</p>
+<p>最笨的办法是逐个试。当前 logit 是 \((1.2, 1.8, 0.2, -0.5, -1.0)\)，loss 是 \(-\log 0.287 \approx 1.248\)。每次只把一个 logit 加 0.1，其余不动，看 loss 怎么变：</p>
+
+<table>
+  <thead><tr><th>把哪个 logit 加 0.1</th><th>新 loss</th><th>loss 变化</th><th>变化 ÷ 0.1</th></tr></thead>
+  <tbody>
+    <tr><td><code>if</code></td><td>1.178</td><td class="c-up">−0.070</td><td>−0.70</td></tr>
+    <tr><td><code>return</code></td><td>1.302</td><td class="c-down">+0.054</td><td>+0.54</td></tr>
+    <tr><td><code>try</code></td><td>1.259</td><td class="c-down">+0.011</td><td>+0.11</td></tr>
+    <tr><td><code>pass</code></td><td>1.254</td><td class="c-down">+0.006</td><td>+0.06</td></tr>
+    <tr><td><code>#</code></td><td>1.251</td><td class="c-down">+0.003</td><td>+0.03</td></tr>
+  </tbody>
+</table>
+
+<p>这张表已经包含了我们要的全部信息。最后一列是“拧一点，loss 变多少”的比率，读法有两层：</p>
+
+<ul>
+  <li><strong>符号告诉方向。</strong>拧高 <code>if</code> 让 loss 下降，所以应该拧高它；拧高 <code>return</code> 让 loss 上升，所以应该反过来拧低它。</li>
+  <li><strong>大小告诉值得拧多少。</strong><code>return</code> 的比率是 0.54，<code>#</code> 只有 0.03。动 <code>return</code> 对 loss 的影响是动 <code>#</code> 的十几倍，把力气花在影响大的旋钮上最划算。</li>
+</ul>
+
+<p>当试探的步长趋近 0 时，这个比率就是导数 \(\partial \mathcal{L} / \partial z_i\)。5 个导数排成的向量叫<strong>梯度</strong>。于是优化手段就很自然了：每个旋钮都朝着让 loss 下降的方向拧，拧的幅度和它的导数成正比，也就是</p>
+
+$$z_i \leftarrow z_i - \eta \,\frac{\partial \mathcal{L}}{\partial z_i}$$
+
+<p>其中 \(\eta\) 是一个小的步长，叫学习率。导数为正就往下拧，导数为负就往上拧。这就是<strong>梯度下降</strong>。拧完以后，概率分布变了，导数也随之改变，于是再算一次、再拧一次，loss 一步步下降。</p>
+
+<p>既然逐个试就能得到导数，为什么还要推公式？因为真实模型要调的不是 5 个 logit，而是几十亿个参数。逐个试意味着每个参数都要重新跑一次模型，代价完全不可接受。求导的意义在于：<strong>写出一个公式，一次就同时算出所有方向上的斜率</strong>。对 logit 的这一层，我们下面把公式推出来；更深的参数，则由反向传播沿着链式法则把这个结果继续往回传给 \(h\)、\(W\) 和 Transformer 内部。</p>
+
+<p>推导分四步：先把 loss 写成 logit 的显式函数，才能对它求导；再分项求导；合起来得到梯度；最后取负号，得到每个 logit 实际被推动的方向。</p>
+
+<p><strong>第一步：把 loss 写成 logit 的函数。</strong>要对 logit 求导，loss 里必须直接出现 logit。现在 loss 里只有 \(p_k\)，所以先把 softmax 代进去。仍然只看光标这一个位置，\(z_i\) 是这个位置的 logit，目标 token 的下标为 \(k\)（即 <code>if</code>）。softmax 给出 \(p_k = e^{z_k} / \sum_j e^{z_j}\)，代入 loss：</p>
 
 $$\mathcal{L} = -\log \frac{e^{z_k}}{\sum_j e^{z_j}}$$
 
@@ -332,7 +362,7 @@ $$\mathcal{L} = -z_k + \log \sum_j e^{z_j}$$
 
 <p>拆开以后，两项各有清楚的含义。第一项 \(-z_k\) 只和目标 token 有关：目标 token 的 logit 越大，loss 越小。第二项 \(\log \sum_j e^{z_j}\) 和所有 token 都有关：所有 token 的整体分数越高，loss 越大，其中分数高的 token 贡献最大，因为指数会放大它们。所以 loss 本身已经说明了训练要做什么：<strong>抬高目标 token，压低其他竞争者。</strong></p>
 
-<p><strong>第二步：分别对两项求导。</strong>我们要求 loss 对任意一个 logit \(z_i\) 的导数，\(i\) 可以是 <code>if</code>、<code>return</code>、<code>try</code> 中的任何一个。</p>
+<p><strong>第二步：分别对两项求导。</strong>现在要算的，就是上面那张试探表最后一列的精确值：把 \(z_i\) 拧动一点点，loss 变化多少。\(i\) 可以是 <code>if</code>、<code>return</code>、<code>try</code> 中的任何一个。loss 是两项之和，和的导数等于各项导数之和，所以分开算。</p>
 
 <p>第一项 \(-z_k\) 里只有目标 token 的 logit。如果 \(i = k\)，正在看的就是 <code>if</code> 本身，导数是 \(-1\)；如果 \(i \neq k\)，比如正在看 <code>return</code>，那么 \(-z_k\) 里根本没有 \(z_{\texttt{return}}\)，导数是 0。</p>
 
@@ -358,7 +388,7 @@ $$\frac{\partial \mathcal{L}}{\partial z} = p - y$$
 
 <p>梯度就是<strong>模型当前预测的分布减去目标分布</strong>。预测和目标差多少，就修正多少。</p>
 
-<p><strong>第四步：取负号得到更新方向。</strong>梯度指向 loss 增大的方向，梯度下降要往反方向走，所以 logit 的变化方向是：</p>
+<p><strong>第四步：取负号得到更新方向。</strong>梯度指向 loss 增大的方向。按梯度下降的规则 \(z_i \leftarrow z_i - \eta\, \partial \mathcal{L}/\partial z_i\)，logit 实际被推动的方向是负梯度：</p>
 
 $$-\frac{\partial \mathcal{L}}{\partial z_i} = \begin{cases} 1 - p_k & i = k \text{（目标 token）} \\ -p_i & i \neq k \text{（其他 token）} \end{cases}$$
 
@@ -376,6 +406,8 @@ $$-\frac{\partial \mathcal{L}}{\partial z_i} = \begin{cases} 1 - p_k & i = k \te
 </table>
 
 <p>这个结果会在本篇反复出现，值得逐条读懂。</p>
+
+<p>对照前面的试探表：公式给出的 \(-0.71, +0.52, +0.11, +0.05, +0.03\)（取负号前的梯度）和试探得到的 \(-0.70, +0.54, +0.11, +0.06, +0.03\) 几乎一致。小的差异来自试探步长 0.1 不是无穷小。公式没有带来新信息，它只是把“逐个试”变成了一次就能算完的表达式。</p>
 
 <p><strong>目标 token 被往上推，力度是 \(1 - p_k\)。</strong>\(1 - p_k\) 是目标 token 离“概率等于 1”还差多少。<code>if</code> 现在是 0.29，还差 0.71，所以被大幅往上推；如果它已经是 0.99，只差 0.01，就几乎不再变化。模型已经学会的东西，梯度会自动变小，不需要人为干预。</p>
 
