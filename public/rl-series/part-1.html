@@ -322,7 +322,7 @@ $$\mathcal{L} = -\log p_{\text{target}}$$
 
 <p>2.1 节给出了目标：让 \(\mathcal{L}\) 变小。但目标本身不告诉我们该怎么做。我们手里能动的是什么？在这一个位置上，loss 由 5 个 logit 决定：\(z_{\texttt{if}}, z_{\texttt{return}}, z_{\texttt{try}}, z_{\texttt{pass}}, z_{\texttt{\#}}\)。可以把它们想象成 5 个旋钮，每个旋钮都可以往上拧或往下拧。问题变成：<strong>每个旋钮该往哪个方向拧，拧多少？</strong></p>
 
-<p>最笨的办法是逐个试。当前 logit 是 \((1.2, 1.8, 0.2, -0.5, -1.0)\)，loss 是 \(-\log 0.287 \approx 1.248\)。每次只把一个 logit 加 0.1，其余不动，看 loss 怎么变：</p>
+<p>最笨的办法是逐个试。当前 logit 是 \((1.2, 1.8, 0.2, -0.5, -1.0)\)。由 softmax，<code>if</code> 的概率是 \(e^{1.2} / (e^{1.2} + e^{1.8} + e^{0.2} + e^{-0.5} + e^{-1.0}) = 3.320 / 11.566 \approx 0.287\)，所以 loss 是 \(-\log 0.287 \approx 1.248\)（这里的 \(\log\) 是自然对数）。每次只把一个 logit 加 0.1，其余不动，看 loss 怎么变：</p>
 
 <table>
   <thead><tr><th>把哪个 logit 加 0.1</th><th>新 loss</th><th>loss 变化</th><th>变化 ÷ 0.1</th></tr></thead>
